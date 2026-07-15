@@ -37,7 +37,8 @@ def find_and_rank_candidates(
         dragon_vein: 可选已算好的 DragonVeinResult（避免重复 ~2min 全量龙脉）
         primary_dragon: 可选 PrimaryDragon
         return_context: True 时额外返回 {dragon_vein, primary_dragon, qi_grid}
-        require_beasts: True 时剔除少祖/四象识别失败、少祖不高于玄武的候选
+        require_beasts: True 时做四象/少祖门禁。缺祖/玄/侧砂可淘汰普通点；
+            热峰与高 qi 堂心 soft_keep。少祖高于玄武仅加减分，默认不硬杀。
     """
     from engine.core.acupoint import search_candidates
     from engine.core.dragon_vein import (
@@ -554,18 +555,40 @@ def find_and_rank_candidates(
 
     results.sort(key=lambda x: -x.overall)
 
-    # —— 四象/少祖门禁：识别失败剔除；少祖高于玄武顺气加分（对标优质候选）——
-    # 仅对预排前列做 detect（控时）；不足 top_k 时放宽侧砂数再扫一轮
+    # —— 四象/少祖门禁 ——
+    # 顺气（祖>玄）只加减分；热峰/高 qi 明堂 soft_keep，避免重构后橙心无候选
     if require_beasts and results:
         pool_n = min(len(results), max(top_k * 5, 28))
-        pool = results[:pool_n]
+        pool_map: dict[tuple[float, float], FusedScore] = {}
+        for r in results[:pool_n]:
+            pool_map[(round(r.x, 4), round(r.y, 4))] = r
+        # 高 qi 堂心并入门禁池（即使 overall 未进前 28）
+        for r in results:
+            qv = float((r.meta or {}).get("qi_field") or 0.0)
+            if qv >= qi_p85 or (r.meta or {}).get("is_qi_peak"):
+                pool_map[(round(r.x, 4), round(r.y, 4))] = r
+        if peak_fused is not None:
+            pool_map[(round(peak_fused.x, 4), round(peak_fused.y, 4))] = peak_fused
+        pool = list(pool_map.values())
+        pool.sort(key=lambda x: -float(x.overall))
+
         gated: list[FusedScore] = []
         rejected_n = 0
         reject_reasons: dict[str, int] = {}
 
-        def _apply_gate(r: FusedScore, *, min_side: int, elev_hard: bool) -> bool:
+        def _is_peak_or_high_qi(r: FusedScore) -> bool:
+            if (r.meta or {}).get("is_qi_peak"):
+                return True
+            qv = float((r.meta or {}).get("qi_field") or 0.0)
+            return qv >= qi_p85
+
+        def _apply_gate(
+            r: FusedScore,
+            *,
+            min_side: int,
+            soft_keep: bool | None = None,
+        ) -> bool:
             nonlocal rejected_n
-            # 找回对应 AcupointCandidate 行号
             crow = ccol = None
             for c in cands:
                 if abs(c.x - r.x) < 1e-6 and abs(c.y - r.y) < 1e-6:
@@ -577,10 +600,15 @@ def find_and_rank_candidates(
                 except Exception:
                     rejected_n += 1
                     reject_reasons["no_rowcol"] = reject_reasons.get("no_rowcol", 0) + 1
+                    # 热峰仍强制保留
+                    if (r.meta or {}).get("is_qi_peak"):
+                        if r.meta is None:
+                            r.meta = {}
+                        r.meta["beasts_gate_reason"] = "soft_force_peak_no_rowcol"
+                        return True
                     return False
             p_loc = None
             try:
-                # 构造临时 candidate 以 reorient 主龙
                 tmp = AcupointCandidate(
                     row=crow, col=ccol, x=r.x, y=r.y,
                     elevation=r.elevation, tpi=0.0, twi=0.0,
@@ -589,12 +617,15 @@ def find_and_rank_candidates(
                 p_loc = _primary_for_cand(tmp)
             except Exception:
                 p_loc = primary
+            if soft_keep is None:
+                soft_keep = _is_peak_or_high_qi(r)
             ok, reason, info = _gate_beasts_for_hole(
                 dem, crow, ccol, water,
                 primary_dragon=p_loc or primary,
                 dragon_vein=dv,
-                require_shaozu_higher=elev_hard,
+                require_shaozu_higher=False,  # 顺气软约束
                 min_side_beasts=min_side,
+                soft_keep=bool(soft_keep),
             )
             if r.meta is None:
                 r.meta = {}
@@ -603,6 +634,10 @@ def find_and_rank_candidates(
             if not ok:
                 rejected_n += 1
                 reject_reasons[reason] = reject_reasons.get(reason, 0) + 1
+                # 热峰永不丢
+                if (r.meta or {}).get("is_qi_peak"):
+                    r.meta["beasts_gate_forced"] = True
+                    return True
                 return False
             bonus = int(info.get("shaozu_higher_bonus") or 0)
             if bonus:
@@ -611,90 +646,69 @@ def find_and_rank_candidates(
                 r.scores["shaozu_higher_bonus"] = bonus
             return True
 
+        # 先严侧砂，再放宽；顺气始终软
         for r in pool:
-            if _apply_gate(r, min_side=2, elev_hard=True):
+            if _apply_gate(r, min_side=1):
                 gated.append(r)
-        # 不足：放宽侧砂 ≥1，仍要求祖>玄
         if len(gated) < top_k:
             seen = {(round(g.x, 3), round(g.y, 3)) for g in gated}
             for r in pool:
                 key = (round(r.x, 3), round(r.y, 3))
                 if key in seen:
                     continue
-                if _apply_gate(r, min_side=1, elev_hard=True):
+                if _apply_gate(r, min_side=0):
                     gated.append(r)
                     seen.add(key)
-                if len(gated) >= top_k:
-                    break
-        # 仍不足：仅要求祖+玄存在（高程仍硬），侧砂 0
-        if len(gated) < max(3, top_k // 2):
-            seen = {(round(g.x, 3), round(g.y, 3)) for g in gated}
-            for r in pool:
-                key = (round(r.x, 3), round(r.y, 3))
-                if key in seen:
-                    continue
-                if _apply_gate(r, min_side=0, elev_hard=True):
-                    gated.append(r)
-                    seen.add(key)
-                if len(gated) >= top_k:
+                if len(gated) >= max(top_k * 2, 15):
                     break
 
         if gated:
             gated.sort(key=lambda x: -x.overall)
             results = gated
-            if peak_fused is not None:
-                # 热峰也须过门禁，否则不强制入榜
-                pf_ok = any(
-                    abs(g.x - peak_fused.x) < 1e-6 and abs(g.y - peak_fused.y) < 1e-6
-                    for g in gated
-                )
-                if not pf_ok:
-                    if _apply_gate(peak_fused, min_side=1, elev_hard=True):
-                        results.insert(0, peak_fused)
-                        results.sort(key=lambda x: -x.overall)
-                    else:
-                        peak_fused = None
-        # gated 空：保留原 results 但标 dirty（避免整局无穴）
         else:
             for r in results[:top_k]:
                 if r.meta is not None:
                     r.meta["beasts_gate_relaxed"] = True
                     r.meta["beasts_gate_reject_summary"] = dict(reject_reasons)
 
-        # 写汇总到首条 meta 便于调试
+        # 热峰强制入榜（软门禁；明堂橙心不丢）
+        if peak_fused is not None:
+            pf_ok = any(
+                abs(g.x - peak_fused.x) < 1e-6 and abs(g.y - peak_fused.y) < 1e-6
+                for g in results
+            )
+            if not pf_ok:
+                _apply_gate(peak_fused, min_side=0, soft_keep=True)
+                if peak_fused.overall < 78:
+                    peak_fused.overall = clamp_score(
+                        max(float(peak_fused.overall), 80)
+                    )
+                results.insert(0, peak_fused)
+                results.sort(key=lambda x: -x.overall)
+
         if results and results[0].meta is not None:
             results[0].meta["beasts_gate_stats"] = {
                 "rejected_n": rejected_n,
                 "reasons": reject_reasons,
                 "require_beasts": True,
+                "policy": "soft_elev_peak_highqi_keep",
             }
 
     results.sort(key=lambda x: -x.overall)
 
-    # 热峰强制进入结果池（仅未开门禁或已通过时）
-    if peak_fused is not None and not require_beasts:
+    # 热峰强制进入结果池（require_beasts 时已处理；未开门禁时仍保送）
+    if peak_fused is not None:
         in_list = any(
             (getattr(r, "meta") or {}).get("is_qi_peak")
             or (abs(r.x - peak_fused.x) < 1e-6 and abs(r.y - peak_fused.y) < 1e-6)
             for r in results
         )
         if not in_list:
-            results = [r for r in results if not (
-                abs(r.x - peak_fused.x) < 1e-6 and abs(r.y - peak_fused.y) < 1e-6
-            )]
             if peak_fused.overall < 78:
                 peak_fused.overall = clamp_score(max(float(peak_fused.overall), 80))
             results.insert(0, peak_fused)
             results.sort(key=lambda x: -x.overall)
-    elif peak_fused is not None and require_beasts:
-        # 已在 gate 段处理；确保列表中热峰仍可优先
-        in_list = any(
-            (getattr(r, "meta") or {}).get("is_qi_peak")
-            or (abs(r.x - peak_fused.x) < 1e-6 and abs(r.y - peak_fused.y) < 1e-6)
-            for r in results
-        )
-        if in_list:
-            # 提到前面再分散
+        else:
             results.sort(key=lambda x: (
                 0 if (getattr(x, "meta") or {}).get("is_qi_peak") else 1,
                 -x.overall,
