@@ -319,7 +319,9 @@ def layer_water_influence(
                 water_gdf = shp_transform(t, water_gdf)
             except Exception:
                 pass
-        result = render_water_influence(water_gdf, dem.bounds, buffer_m=buffer_m)
+        result = render_water_influence(
+            water_gdf, dem.bounds, buffer_m=buffer_m, dem=dem,
+        )
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
@@ -649,7 +651,9 @@ def layer_all(
             basemap = render_basemap(dem)
 
         # 2. 水煞影响带
-        wi = render_water_influence(water_gdf, dem.bounds, buffer_m=influence_buffer_m)
+        wi = render_water_influence(
+            water_gdf, dem.bounds, buffer_m=influence_buffer_m, dem=dem,
+        )
 
         # 3. 水系
         w = render_water(water_gdf, dem.bounds)

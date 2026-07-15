@@ -497,17 +497,33 @@ def _poly_collection(geoms, **kwargs):
 def render_water_influence(
     water_gdf,
     bounds: tuple[float, float, float, float],
-    buffer_m: float = 1200.0,
+    buffer_m: float | None = None,
     figsize: tuple[float, float] | None = None,
     dpi: int = 110,
+    dem=None,
 ) -> RenderResult:
-    """水系附近的「水煞影响带」：紫灰色点阵（参考图风格）。
+    """水系「水煞影响带」紫灰点阵 — 非「近水即满煞」。
 
-    主河 buffer 全画；支流用较窄 buffer，避免整图糊死但仍可见。
+    - 无 DEM：窄岸缘条带（割脚示意），非 km 级填充
+    - 有 DEM：采样点按 距离×海拔衰减×流向冲 调 alpha/是否绘制
+      （与 water_sha_influence_risk 一致；玉带堂心/高台淡出）
+
+    dem: 可选 DEM（与 water_gdf 同 CRS 时海拔/流向最准）
+    buffer_m: 兼容旧参数；有 DEM 时作采样外缘上限，无 DEM 时覆盖默认窄带。
     """
     import matplotlib.pyplot as plt
     from shapely.geometry import Point as SPoint
     from shapely.ops import unary_union
+
+    from engine.core.water_sha_influence import (
+        INFLUENCE_BANK_MAJOR_M,
+        INFLUENCE_BANK_MINOR_M,
+        INFLUENCE_SAMPLE_MAJOR_M,
+        INFLUENCE_SAMPLE_MINOR_M,
+        INFLUENCE_DRAW_MIN,
+        water_sha_influence_at_xy,
+        water_sha_dist_risk,
+    )
 
     minx, miny, maxx, maxy = bounds
     if figsize is None:
@@ -526,15 +542,23 @@ def render_water_influence(
         return RenderResult(
             width=100, height=100, bbox=bounds,
             png_base64=_to_png_base64(fig, dpi=dpi),
-            legend={"type": "water_influence", "count": 0},
+            legend={"type": "water_influence", "count": 0, "mode": "empty"},
         )
 
-    buf_major = _meters_to_units(buffer_m, bounds)
-    buf_minor = _meters_to_units(max(350.0, buffer_m * 0.45), bounds)
-    # 点阵略加密，参考图紫灰带更易辨认
-    spacing = _meters_to_units(160.0, bounds)
+    has_dem = dem is not None and getattr(dem, "data", None) is not None
+    # 窄岸默认；buffer_m 仅作上限/兼容旧宽缓冲请求时夹紧
+    if buffer_m is not None and float(buffer_m) > 0:
+        major_m = min(float(buffer_m), INFLUENCE_SAMPLE_MAJOR_M if has_dem else INFLUENCE_BANK_MAJOR_M)
+        minor_m = min(float(buffer_m) * 0.55, INFLUENCE_SAMPLE_MINOR_M if has_dem else INFLUENCE_BANK_MINOR_M)
+    else:
+        major_m = INFLUENCE_SAMPLE_MAJOR_M if has_dem else INFLUENCE_BANK_MAJOR_M
+        minor_m = INFLUENCE_SAMPLE_MINOR_M if has_dem else INFLUENCE_BANK_MINOR_M
+
+    buf_major = _meters_to_units(major_m, bounds)
+    buf_minor = _meters_to_units(minor_m, bounds)
+    spacing = _meters_to_units(55.0 if has_dem else 70.0, bounds)
     if spacing <= 0:
-        spacing = (maxx - minx) / 80.0
+        spacing = (maxx - minx) / 100.0
 
     majors, minors = [], []
     for _, row in water_gdf.iterrows():
@@ -550,7 +574,7 @@ def render_water_influence(
         return RenderResult(
             width=100, height=100, bbox=bounds,
             png_base64=_to_png_base64(fig, dpi=dpi),
-            legend={"type": "water_influence", "count": 0},
+            legend={"type": "water_influence", "count": 0, "mode": "empty"},
         )
 
     parts = []
@@ -567,10 +591,9 @@ def render_water_influence(
         return RenderResult(
             width=100, height=100, bbox=bounds,
             png_base64=_to_png_base64(fig, dpi=dpi),
-            legend={"type": "water_influence", "count": 0},
+            legend={"type": "water_influence", "count": 0, "mode": "empty"},
         )
 
-    # 裁到图幅
     try:
         from shapely.geometry import box as shapely_box
         merged = merged.intersection(shapely_box(minx, miny, maxx, maxy))
@@ -580,7 +603,7 @@ def render_water_influence(
         return RenderResult(
             width=100, height=100, bbox=bounds,
             png_base64=_to_png_base64(fig, dpi=dpi),
-            legend={"type": "water_influence", "count": 0},
+            legend={"type": "water_influence", "count": 0, "mode": "empty"},
         )
 
     minxg, minyg, maxxg, maxyg = merged.bounds
@@ -595,34 +618,74 @@ def render_water_influence(
         return RenderResult(
             width=100, height=100, bbox=bounds,
             png_base64=_to_png_base64(fig, dpi=dpi),
-            legend={"type": "water_influence", "count": 0},
+            legend={"type": "water_influence", "count": 0, "mode": "empty"},
         )
-    # 防止点数爆炸
-    if len(xs) * len(ys) > 80_000:
-        step = int(np.ceil(np.sqrt(len(xs) * len(ys) / 80_000.0)))
+    if len(xs) * len(ys) > 50_000:
+        step = int(np.ceil(np.sqrt(len(xs) * len(ys) / 50_000.0)))
         xs = xs[::step]
         ys = ys[::step]
 
     xx, yy = np.meshgrid(xs, ys)
-    pts_x, pts_y = [], []
+    pts_x, pts_y, alphas, sizes = [], [], [], []
+    n_cand = 0
     try:
         from shapely import prepared
         prep = prepared.prep(merged)
-        for px, py in zip(xx.ravel(), yy.ravel()):
-            if prep.contains(SPoint(px, py)):
-                pts_x.append(px)
-                pts_y.append(py)
+        candidates = [
+            (float(px), float(py))
+            for px, py in zip(xx.ravel(), yy.ravel())
+            if prep.contains(SPoint(px, py))
+        ]
     except Exception:
         polys = list(merged.geoms) if hasattr(merged, "geoms") else [merged]
+        candidates = []
         for px, py in zip(xx.ravel(), yy.ravel()):
-            p = SPoint(px, py)
+            p = SPoint(float(px), float(py))
             if any(poly.contains(p) for poly in polys):
-                pts_x.append(px)
-                pts_y.append(py)
+                candidates.append((float(px), float(py)))
+
+    n_cand = len(candidates)
+    # 点数过多时降采样风险计算
+    if n_cand > 12_000:
+        stride = int(np.ceil(n_cand / 12_000.0))
+        candidates = candidates[::stride]
+
+    raw_water = None
+    if not has_dem:
+        try:
+            raw_water = unary_union(majors + minors)
+        except Exception:
+            raw_water = None
+
+    for px, py in candidates:
+        if has_dem:
+            risk = water_sha_influence_at_xy(px, py, water_gdf, dem=dem)
+        else:
+            # 无 DEM：仅距离窄带（割脚示意），非 km 填充
+            d_m = 40.0
+            try:
+                from shapely.geometry import Point as P2
+                if raw_water is not None:
+                    d_m = float(P2(px, py).distance(raw_water))
+            except Exception:
+                pass
+            risk = water_sha_dist_risk(d_m)
+        if risk < INFLUENCE_DRAW_MIN:
+            continue
+        pts_x.append(px)
+        pts_y.append(py)
+        # alpha: 0.18–0.72 by risk
+        alphas.append(float(0.18 + 0.54 * risk))
+        sizes.append(float(8.0 + 10.0 * risk))
+
     if pts_x:
+        # scatter with per-point alpha via rgba
+        from matplotlib.colors import to_rgba
+        base = to_rgba(WATER_INFLUENCE)
+        colors = [(base[0], base[1], base[2], a) for a in alphas]
         ax.scatter(
-            pts_x, pts_y, s=14, c=WATER_INFLUENCE, marker="s",
-            alpha=0.55, linewidths=0, zorder=4,
+            pts_x, pts_y, s=sizes, c=colors, marker="s",
+            linewidths=0, zorder=4,
         )
 
     return RenderResult(
@@ -632,10 +695,14 @@ def render_water_influence(
         png_base64=_to_png_base64(fig, dpi=dpi),
         legend={
             "type": "water_influence",
-            "buffer_m": buffer_m,
+            "buffer_m_major": major_m,
+            "buffer_m_minor": minor_m,
             "count": len(pts_x),
+            "n_candidates": n_cand,
             "n_major": len(majors),
             "n_minor": len(minors),
+            "mode": "dem_risk" if has_dem else "narrow_bank",
+            "draw_min": INFLUENCE_DRAW_MIN,
         },
     )
 
@@ -1035,7 +1102,7 @@ def render_combined(
 
     # 2. 水煞影响带（在水体下方，更柔和）
     if water_influence and water_gdf is not None:
-        wi = render_water_influence(water_gdf, dem.bounds, dpi=dpi)
+        wi = render_water_influence(water_gdf, dem.bounds, dpi=dpi, dem=dem)
         img = Image.open(io.BytesIO(_b64.b64decode(wi.png_base64)))
         ax.imshow(np.asarray(img), extent=_extent_for(dem), origin="upper",
                   aspect="equal", interpolation="bilinear")
