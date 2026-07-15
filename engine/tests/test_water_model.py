@@ -14,6 +14,7 @@ from engine.core.water_model import (
     water_get_score,
     water_sha_penalty,
     water_get_baseline,
+    water_sha_elev_factor,
     evaluate_water_channels,
     fuse_field_with_sha,
     form_gamma_and_penalty,
@@ -69,6 +70,88 @@ class TestDualChannelIndependence:
         b5000 = water_get_baseline(5000.0)
         assert b300 >= b50
         assert b300 > b5000
+
+    def test_sha_elev_attenuation_high_terrace(self):
+        """近水位满煞；高台相对水面明显抬升后水煞衰减。"""
+        f0 = water_sha_elev_factor(0.0)
+        f3 = water_sha_elev_factor(3.0)
+        f20 = water_sha_elev_factor(20.0)
+        f50 = water_sha_elev_factor(50.0)
+        assert f0 == pytest.approx(1.0)
+        assert f3 <= 1.0
+        assert f20 < f3
+        assert f50 < f20
+        assert f50 >= 0.15
+
+        # 同距贴岸：高台 P 水煞 < 漫滩
+        sha_flat = water_sha_penalty(60.0, elev_above_water_m=1.0)
+        sha_high = water_sha_penalty(60.0, elev_above_water_m=35.0)
+        assert sha_flat > sha_high + 15.0
+
+        ch_lo = evaluate_water_channels(70.0, elev_above_water_m=1.0)
+        ch_hi = evaluate_water_channels(70.0, elev_above_water_m=30.0)
+        assert ch_lo.sha_penalty > ch_hi.sha_penalty
+        # 得水不应因高差被关掉
+        assert ch_hi.get_score > 50.0
+
+    def test_sha_elev_unknown_no_change(self):
+        """无高程信息时与旧行为一致（不衰减）。"""
+        a = water_sha_penalty(80.0)
+        b = water_sha_penalty(80.0, elev_above_water_m=None)
+        assert a == pytest.approx(b)
+
+    def test_rush_uses_flow_toward_hole_not_just_near(self):
+        """直冲：流向对准穴才高；同距但在流向背侧/旁侧 rush 应低。
+
+        河线沿 x 轴，西高东低 → 流向东；穴在东延长线受冲，北侧旁开不冲。
+        """
+        from shapely.geometry import LineString
+        import geopandas as gpd
+        from rasterio.transform import from_origin
+        from engine.io.dem import DEM
+        from engine.io.rivers import WaterNetwork
+
+        # 3857 米制河：x=0→1000，西高东低
+        line = LineString([(0.0, 0.0), (1000.0, 0.0)])
+        gdf = gpd.GeoDataFrame(geometry=[line], crs="EPSG:3857")
+        wn = WaterNetwork(gdf=gdf)
+
+        # DEM：x 越大越低（覆盖 x≈-200..2000, y≈-200..1000）
+        h, w = 50, 50
+        transform = from_origin(-250.0, 800.0, 50.0, 50.0)
+        data = np.zeros((h, w), dtype=np.float64)
+        for r in range(h):
+            for c in range(w):
+                xx = -250.0 + c * 50.0 + 25.0
+                data[r, c] = 200.0 - xx * 0.05  # 西高东低
+        dem = DEM(
+            data=data,
+            transform=transform,
+            crs="EPSG:3857",
+            nodata=-9999.0,
+            bounds=(-250.0, -1700.0, 2250.0, 800.0),
+            resolution=(50.0, 50.0),
+        )
+
+        # 穴在河东端前方（流向冲来）：(1200, 0)
+        form_rush = classify_water_form_at_point(
+            1200.0, 0.0, wn, dist_m=200.0, dem=dem,
+        )
+        # 穴在河北侧旁开：同距量级 (500, 250)
+        form_side = classify_water_form_at_point(
+            500.0, 250.0, wn, dist_m=250.0, dem=dem,
+        )
+        # 穴在河西上游「背向」：( -150, 0) 相对足点，流向不指该侧
+        form_back = classify_water_form_at_point(
+            -150.0, 0.0, wn, dist_m=150.0, dem=dem,
+        )
+
+        assert form_rush.get("flow_method") in ("dem_downhill", "digitized", "digitized_flat")
+        # 东向穴：flow_cos 应明显为正且 rush 高于旁开/背向
+        if form_rush.get("flow_method") == "dem_downhill":
+            assert form_rush.get("flow_cos", 0) > 0.5
+            assert form_rush.get("rush", 0) > form_side.get("rush", 0) - 0.05
+            assert form_rush.get("rush", 0) >= form_back.get("rush", 0)
 
 
 class TestRiverFormGeometry:

@@ -106,18 +106,49 @@ def score_water_relation(
         nearest = float("inf")
 
     d_use = 0.0 if intersects else float(nearest)
-    form = classify_water_form_at_point(x, y, water, dist_m=d_use)
+    # 传 dem：流向按高→低，直冲看是否对准穴
+    form = classify_water_form_at_point(x, y, water, dist_m=d_use, dem=dem)
     # A1-水曲：三节弓背/玉带并入 form 软标签 → 再进 Γ_get / P_form（双通道不混维）
     if np.isfinite(d_use) and d_use > 0:
         form = enrich_form_with_water_curve(form, water, x, y, dist_m=d_use)
-    ch = evaluate_water_channels(d_use, banned=bool(intersects), form=form)
+
+    # 海拔衰减：z_穴 − z_最近水面（高台少受水势冲，漫滩满煞）
+    elev_above = _elev_above_nearest_water(x, y, water, dem)
+
+    ch = evaluate_water_channels(
+        d_use,
+        banned=bool(intersects),
+        form=form,
+        elev_above_water_m=elev_above,
+    )
     score = clamp_score(ch.fused)
     get_i = clamp_score(ch.get_score)
     sha_i = clamp_score(ch.sha_penalty)
+    form = ch.form or form
+
+    elev_note = ""
+    if elev_above is not None and np.isfinite(elev_above):
+        elev_note = f"，相对水面高差约 {elev_above:.0f} m"
+        if elev_above >= 12.0:
+            elev_note += "（高台，水煞衰减）"
+        elif elev_above <= 3.0:
+            elev_note += "（近水位）"
+
+    rush_note = ""
+    if float(form.get("rush", 0) or 0) > 0.35:
+        cos_f = float(form.get("flow_cos", 0) or 0)
+        method = str(form.get("flow_method") or "")
+        rush_note = f"，直冲倾向(流向对穴 cos={cos_f:.2f}"
+        if method:
+            rush_note += f"/{method}"
+        rush_note += ")"
+    elif float(form.get("side_shoot", 0) or 0) > 0.35:
+        rush_note = "，射胁倾向"
 
     if intersects or (np.isfinite(nearest) and nearest <= 80):
         msg = (
-            f"水系过近/相交（约 {0 if intersects else nearest:.0f} m），"
+            f"水系过近/相交（约 {0 if intersects else nearest:.0f} m）"
+            f"{elev_note}{rush_note}，"
             f"S_得水={get_i}，P_水煞={sha_i}，综合显示 {score}。"
             "宜避割脚、漫滩，不宜直接作穴。"
         )
@@ -128,7 +159,9 @@ def score_water_relation(
         if form.get("reverse_bow", 0) > 0.3:
             tags.append("反弓倾向")
         if form.get("rush", 0) > 0.3:
-            tags.append("直冲倾向")
+            tags.append("直冲（流向对穴）")
+        if form.get("side_shoot", 0) > 0.3:
+            tags.append("射胁")
         if form.get("three_seg_concave", 0) > 0.3:
             tags.append("三节朝抱")
         if form.get("three_seg_convex", 0) > 0.3:
@@ -150,7 +183,8 @@ def score_water_relation(
             level = "距离较远"
             nearest_disp = nearest
         msg = (
-            f"最近水体位于{direction}侧约 {nearest_disp:.0f} m，{level}{tag_s}；"
+            f"最近水体位于{direction}侧约 {nearest_disp:.0f} m，"
+            f"{level}{tag_s}{elev_note}{rush_note}；"
             f"S_得水={get_i}，P_水煞={sha_i}，综合显示 {score}。"
         )
 
@@ -165,6 +199,86 @@ def score_water_relation(
         sha_penalty=sha_i,
         form=form,
     )
+
+
+def _elev_above_nearest_water(
+    x: float,
+    y: float,
+    water: WaterNetwork | None,
+    dem: DEM | None,
+) -> float | None:
+    """穴高 − 最近水面高；失败返回 None（调用方不衰减）。"""
+    if dem is None or water is None or getattr(water, "empty", True):
+        return None
+    try:
+        z_hole = float(dem.sample(x, y))
+    except Exception:
+        return None
+    if not np.isfinite(z_hole):
+        return None
+    wx, wy = _nearest_water_xy_dem_crs(x, y, water, dem)
+    if wx is None:
+        return None
+    try:
+        z_w = float(dem.sample(wx, wy))
+    except Exception:
+        return None
+    if not np.isfinite(z_w):
+        return None
+    return float(z_hole - z_w)
+
+
+def _nearest_water_xy_dem_crs(
+    x: float,
+    y: float,
+    water: WaterNetwork,
+    dem: DEM,
+) -> tuple[float | None, float | None]:
+    """最近水系点，尽量落在 DEM 坐标中以便 sample。"""
+    try:
+        from shapely.geometry import Point
+        from shapely.ops import nearest_points
+
+        gdf = getattr(water, "gdf", None)
+        if gdf is None or gdf.empty:
+            return None, None
+        # 优先与 DEM 同 CRS 的 gdf
+        pt = Point(float(x), float(y))
+        best = None
+        best_d = float("inf")
+        for geom in gdf.geometry:
+            if geom is None or geom.is_empty:
+                continue
+            try:
+                _, on_w = nearest_points(pt, geom)
+                d = float(pt.distance(on_w))
+                if d < best_d:
+                    best_d = d
+                    best = on_w
+            except Exception:
+                continue
+        if best is not None:
+            return float(best.x), float(best.y)
+    except Exception:
+        pass
+    # 回退：3857 最近点再粗用（同 CRS 时可用）
+    try:
+        from shapely.ops import nearest_points
+
+        pt = water._to_3857(x, y)
+        gdf_p = water.projected_gdf
+        if gdf_p is None or gdf_p.empty:
+            return None, None
+        distances = gdf_p.distance(pt)
+        valid = distances.replace([np.inf, -np.inf], np.nan).dropna()
+        if valid.empty:
+            return None, None
+        idx = valid.idxmin()
+        geom = gdf_p.geometry.loc[idx]
+        _, on_w = nearest_points(pt, geom)
+        return float(on_w.x), float(on_w.y)
+    except Exception:
+        return None, None
 
 
 def score_sand_mountain(

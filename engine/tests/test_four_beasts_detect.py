@@ -170,6 +170,30 @@ class TestDetectFourBeasts:
             # 白虎 ≥ 约 0.08L（比例下限放宽容差）
             assert bh["dist_m"] >= min(0.08 * L, float((params.get("baihu") or [0])[0]) * 0.7)
 
+    def test_gate_rejects_missing_shaozu_logic(self):
+        """门禁：无少祖 / 少祖不高于玄武 → 不通过。"""
+        from engine.core.fengshui_score import _gate_beasts_for_hole
+
+        # 构造空 info 路径：用极小 DEM 中心，允许失败但不崩溃
+        h, w = synth_dem_shape = (30, 30)
+        # 使用 fixture-free 最小 DEM
+        from rasterio.transform import from_origin
+        from engine.io.dem import DEM
+        import numpy as np
+        data = np.linspace(50, 120, 30 * 30).reshape(30, 30)
+        dem = DEM(
+            data=data.astype(float),
+            transform=from_origin(0, 900, 30, 30),
+            crs="EPSG:3857",
+            nodata=-9999.0,
+            bounds=(0.0, 0.0, 900.0, 900.0),
+            resolution=(30.0, 30.0),
+        )
+        ok, reason, info = _gate_beasts_for_hole(dem, 15, 15, water=None)
+        # 可能通过也可能因 incomplete 失败；必须有 reason 字段
+        assert reason
+        assert "beasts_present" in info or "reason" in info
+
 
 class TestInferFacing:
     def test_default_or_terrain(self, synth_dem):

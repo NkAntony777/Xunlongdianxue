@@ -86,6 +86,7 @@ def water_sha_dist_penalty(dist_m: float, *, banned: bool = False) -> float:
     """P_dist(d)：距离割脚/近场煞。
 
     贴岸（<150m）加重惩罚，逼候选离岸入堂；200m 外轻煞。
+    海拔衰减见 water_sha_elev_factor / water_sha_penalty。
     """
     if banned or not np.isfinite(dist_m) or dist_m < 0:
         return 100.0
@@ -104,6 +105,41 @@ def water_sha_dist_penalty(dist_m: float, *, banned: bool = False) -> float:
     if dist_m <= 1100:
         return 6.0
     return 0.0
+
+
+def water_sha_elev_factor(
+    elev_above_water_m: float | None,
+    *,
+    dh_full_m: float = 2.0,
+    dh_mid_m: float = 12.0,
+    dh_high_m: float = 40.0,
+    floor: float = 0.16,
+) -> float:
+    """水煞海拔衰减因子 ∈ [floor, 1]（1=不减，floor=高台最弱）。
+
+    理论（形峦）：
+      - 割脚/漫滩：穴与水面近乎同高 → 受水势冲、根基不稳 → 满煞
+      - 有余气毡唇/高台：穴明显高于水面 → 水不冲顶、气止有岸 → 煞衰减
+      - 反弓/直冲等形态煞仍部分保留（非纯距离割脚）
+
+    elev_above_water_m = z_穴 − z_最近水面（米）；未知时返回 1.0（不改旧行为）。
+    """
+    if elev_above_water_m is None or not np.isfinite(float(elev_above_water_m)):
+        return 1.0
+    dh = float(elev_above_water_m)
+    # 穴低于水面（岸下/漫滩）→ 满煞或更重，夹到 1
+    if dh <= dh_full_m:
+        return 1.0
+    if dh >= dh_high_m:
+        return float(np.clip(floor, 0.05, 1.0))
+    fl = float(np.clip(floor, 0.05, 1.0))
+    if dh <= dh_mid_m:
+        # 2→12 m：1.0 → 0.62（缓降）
+        t = (dh - dh_full_m) / max(dh_mid_m - dh_full_m, 1e-6)
+        return float(1.0 - 0.38 * np.clip(t, 0.0, 1.0))
+    # 12→40 m：0.62 → floor
+    t = (dh - dh_mid_m) / max(dh_high_m - dh_mid_m, 1e-6)
+    return float(0.62 - (0.62 - fl) * np.clip(t, 0.0, 1.0))
 
 
 def water_get_score(
@@ -129,11 +165,23 @@ def water_sha_penalty(
     *,
     banned: bool = False,
     form_penalty: float = 0.0,
+    elev_above_water_m: float | None = None,
+    elev_factor: float | None = None,
 ) -> float:
-    """P_水煞 = max(P_dist, P_form)。"""
+    """P_水煞 = max(P_dist, P_form)，再乘海拔衰减。
+
+    - 距离割脚：随高台强烈衰减（余气台地少受冲）
+    - 形态煞（反弓/直冲）：部分衰减（几何无情仍在，但水势冲弱）
+    """
     p_dist = water_sha_dist_penalty(dist_m, banned=banned)
     p_form = float(np.clip(form_penalty, 0.0, 100.0))
-    return float(max(p_dist, p_form))
+    if elev_factor is None:
+        elev_factor = water_sha_elev_factor(elev_above_water_m)
+    ef = float(np.clip(elev_factor, 0.05, 1.0))
+    # 距离煞：满衰减；形态煞：保留至少一半权重（反弓仍无情）
+    p_dist_a = p_dist * ef
+    p_form_a = p_form * (0.50 + 0.50 * ef)
+    return float(max(p_dist_a, p_form_a))
 
 
 def fuse_water_additive(
@@ -170,6 +218,7 @@ def form_gamma_and_penalty(form: dict[str, float]) -> tuple[float, float]:
     meander = float(form.get("meander", 0.0))
     rev = float(form.get("reverse_bow", 0.0))
     rush = float(form.get("rush", 0.0))
+    side_shoot = float(form.get("side_shoot", 0.0))
     cut = float(form.get("cut_foot", 0.0))
     leak = float(form.get("leak", 0.0))
 
@@ -180,11 +229,14 @@ def form_gamma_and_penalty(form: dict[str, float]) -> tuple[float, float]:
         + 0.15 * meander
         - 0.40 * rev
         - 0.50 * rush
+        - 0.25 * side_shoot
     )
     gamma = float(np.clip(gamma, 0.3, 1.3))
 
+    # 直冲权重大于射胁；均低于「硬禁」
     p_form = 100.0 * max(
-        0.90 * rush,
+        0.92 * rush,
+        0.72 * side_shoot,
         0.85 * rev,
         0.70 * cut,
         0.60 * leak,
@@ -301,6 +353,85 @@ def _estimate_pool_soft(
         return 0.0
 
 
+def _elev_fn_for_projected_xy(dem) -> Any | None:
+    """返回 f(x,y)->elev，xy 为 EPSG:3857（与 projected_gdf 一致）。"""
+    if dem is None:
+        return None
+    try:
+        crs = str(getattr(dem, "crs", "") or "")
+        if "3857" in crs.upper():
+            def _fn(xx: float, yy: float) -> float:
+                try:
+                    return float(dem.sample(xx, yy))
+                except Exception:
+                    return float("nan")
+            return _fn
+        from pyproj import Transformer
+
+        tr = Transformer.from_crs("EPSG:3857", dem.crs, always_xy=True)
+
+        def _fn2(xx: float, yy: float) -> float:
+            try:
+                u, v = tr.transform(xx, yy)
+                return float(dem.sample(u, v))
+            except Exception:
+                return float("nan")
+
+        return _fn2
+    except Exception:
+        return None
+
+
+def _flow_tangent_dem(
+    line,
+    s_star: float,
+    L: float,
+    elev_fn,
+    *,
+    p0_xy: tuple[float, float],
+    p2_xy: tuple[float, float],
+) -> tuple[float, float, str]:
+    """估计河段单位流向（高→低）。
+
+    优先 DEM 沿河采样；失败则回退数字化方向 p0→p2（不可靠，标 method）。
+    返回 (tx, ty, method)。
+    """
+    # 数字化方向（弱默认）
+    ddx = float(p2_xy[0] - p0_xy[0])
+    ddy = float(p2_xy[1] - p0_xy[1])
+    dn = max(np.hypot(ddx, ddy), 1e-9)
+    t_dig = (ddx / dn, ddy / dn)
+
+    if elev_fn is None or L < 20.0:
+        return t_dig[0], t_dig[1], "digitized"
+
+    # 多尺度：取足点上下游，看哪端更高 → 流向由高到低
+    for ds_frac, ds_cap in ((0.12, 180.0), (0.20, 320.0), (0.08, 80.0)):
+        ds = max(35.0, min(L * ds_frac, ds_cap))
+        s_a = max(0.0, s_star - ds)
+        s_b = min(L, s_star + ds)
+        if s_b - s_a < 25.0:
+            continue
+        pa = line.interpolate(s_a)
+        pb = line.interpolate(s_b)
+        ea = elev_fn(float(pa.x), float(pa.y))
+        eb = elev_fn(float(pb.x), float(pb.y))
+        if not (np.isfinite(ea) and np.isfinite(eb)):
+            continue
+        de = float(ea - eb)
+        if abs(de) < 0.25:
+            continue  # 近乎平，换更大窗
+        # 高 → 低
+        if de > 0:
+            vx, vy = float(pb.x - pa.x), float(pb.y - pa.y)
+        else:
+            vx, vy = float(pa.x - pb.x), float(pa.y - pb.y)
+        n = max(np.hypot(vx, vy), 1e-9)
+        return vx / n, vy / n, "dem_downhill"
+
+    return t_dig[0], t_dig[1], "digitized_flat"
+
+
 def classify_water_form_at_point(
     x: float,
     y: float,
@@ -308,10 +439,12 @@ def classify_water_form_at_point(
     *,
     dist_m: float | None = None,
     facing: float | None = None,
+    dem=None,
 ) -> dict[str, float]:
     """估计 χ 标签：玉带 / 反弓 / 割脚 / 直冲 / 聚堂 / 九曲（软值 0–1）。
 
     基于最近河段三点曲率 + 侧别（数理 §2.2–2.3）+ P2 聚堂/九曲。
+    **直冲**：河段流向（DEM 高→低）是否对准穴，非「近水即冲」。
     water 为 WaterNetwork；失败时返回空标签。
     """
     form = {
@@ -324,6 +457,8 @@ def classify_water_form_at_point(
         "leak": 0.0,
         "side": 0.0,       # ι ∈ {-1,0,1}
         "curvature": 0.0,
+        "flow_cos": 0.0,   # 流向·(足→穴)，>0 表示流向指向穴
+        "flow_method": "",  # dem_downhill | digitized | ...
     }
     if water is None or getattr(water, "empty", True):
         return form
@@ -457,16 +592,46 @@ def classify_water_form_at_point(
         except Exception:
             pass
 
-        # 直冲：切向对准点
-        # 流向用 (p2-p0)，指向点 (pt-p1)
-        fdx, fdy = cx - ax, cy - ay
-        fn = max(np.hypot(fdx, fdy), 1e-9)
-        fdx, fdy = fdx / fn, fdy / fn
-        rnx, rny = rdx / max(np.hypot(rdx, rdy), 1e-9), rdy / max(np.hypot(rdx, rdy), 1e-9)
-        # cos：水流指向穴
-        cos_to = fdx * rnx + fdy * rny
-        if cos_to > 0.85 and dist_m < 1500:
-            form["rush"] = float(np.clip((cos_to - 0.85) / 0.15, 0.0, 1.0) * dist_w)
+        # —— 直冲 / 水势冲：必须看流向（高→低），是否对准穴 ——
+        # 数理 §2.3：χ_rush ∝ ∠(t_flow, p−γ) 小且逼近；去水/横流不算冲
+        elev_fn = _elev_fn_for_projected_xy(dem)
+        fdx, fdy, flow_method = _flow_tangent_dem(
+            line, s_star, L, elev_fn,
+            p0_xy=(ax, ay), p2_xy=(cx, cy),
+        )
+        form["flow_method"] = flow_method
+        rn = max(np.hypot(rdx, rdy), 1e-9)
+        rnx, rny = rdx / rn, rdy / rn  # 足点 → 穴
+        # cos>0：流向指向穴一侧（冲向/逼近）；cos≈0 横过；cos<0 去水背向
+        cos_to = float(fdx * rnx + fdy * rny)
+        form["flow_cos"] = cos_to
+        # 流向方位（北=0）供展示
+        form["flow_bearing_deg"] = _bearing_deg(fdx, fdy)
+
+        if dist_m < 2000 and cos_to > 0.50:
+            # 0.50→0.95 线性抬升；距离窗衰减
+            rush_align = float(np.clip((cos_to - 0.50) / 0.45, 0.0, 1.0))
+            # 过远冲势弱
+            if dist_m > 900:
+                dist_rush = float(np.clip(1.0 - (dist_m - 900.0) / 1100.0, 0.0, 1.0))
+            else:
+                dist_rush = dist_w if dist_m > 0 else 0.0
+                dist_rush = max(dist_rush, 0.55 if dist_m < 400 else dist_rush)
+            form["rush"] = float(np.clip(rush_align * dist_rush, 0.0, 1.0))
+            # DEM 定流向比数字化更可信 → 略抬
+            if flow_method == "dem_downhill" and form["rush"] > 0.15:
+                form["rush"] = float(min(1.0, form["rush"] * 1.12))
+        else:
+            form["rush"] = 0.0
+
+        # 射胁：流向略偏，侧向擦过穴（|sin| 中高、cos 中正）
+        sin_to = abs(fdx * rny - fdy * rnx)
+        if dist_m < 1200 and cos_to > 0.25 and sin_to > 0.45 and cos_to < 0.85:
+            form["side_shoot"] = float(
+                np.clip(sin_to * cos_to * dist_w, 0.0, 0.85)
+            )
+        else:
+            form["side_shoot"] = 0.0
 
         # 朝向一致性：水在穴之前方扇区 → 抬得水形态；在后方则压低
         if facing is not None and np.isfinite(facing):
@@ -559,15 +724,24 @@ def evaluate_water_channels(
     banned: bool = False,
     form: dict[str, float] | None = None,
     facing_weight: float = 1.0,
+    elev_above_water_m: float | None = None,
 ) -> WaterChannels:
-    """完整双通道评估。"""
+    """完整双通道评估。
+
+    elev_above_water_m: 穴相对最近水面的高差 (m)，用于水煞海拔衰减；
+    未知则不衰减（与旧行为一致）。
+    """
     form = form or {}
     hard = bool(banned or (np.isfinite(dist_m) and dist_m <= 0))
     gamma, p_form = form_gamma_and_penalty(form)
-    # 割脚抬高 cut 标签
+    # 割脚抬高 cut 标签；高台可减弱 cut 语义（仍有余气）
     if np.isfinite(dist_m) and dist_m <= D_CUT_M and not hard:
         form = dict(form)
-        form["cut_foot"] = max(float(form.get("cut_foot", 0.0)), 1.0 - dist_m / D_CUT_M)
+        cut = max(float(form.get("cut_foot", 0.0)), 1.0 - dist_m / D_CUT_M)
+        if elev_above_water_m is not None and np.isfinite(elev_above_water_m):
+            # 明显高于水面：割脚标签减弱（有台地）
+            cut *= water_sha_elev_factor(float(elev_above_water_m))
+        form["cut_foot"] = float(np.clip(cut, 0.0, 1.0))
         gamma, p_form = form_gamma_and_penalty(form)
 
     get_s = water_get_score(
@@ -576,10 +750,12 @@ def evaluate_water_channels(
         gamma_get=gamma,
         face_weight=facing_weight,
     )
+    elev_f = water_sha_elev_factor(elev_above_water_m)
     sha_p = water_sha_penalty(
         dist_m if not hard else 0.0,
         banned=hard,
         form_penalty=p_form,
+        elev_factor=elev_f,
     )
     # 兼容旧接口的「水综合显示分」：得水主导、煞惩罚（仍分通道计算）
     fused = float(np.clip(
@@ -591,6 +767,14 @@ def evaluate_water_channels(
         get_s = 0.0
         sha_p = 100.0
 
+    form = dict(form)
+    form["elev_above_water_m"] = (
+        float(elev_above_water_m)
+        if elev_above_water_m is not None and np.isfinite(float(elev_above_water_m))
+        else None
+    )
+    form["sha_elev_factor"] = float(elev_f)
+
     return WaterChannels(
         get_score=get_s,
         sha_penalty=sha_p,
@@ -598,6 +782,11 @@ def evaluate_water_channels(
         hard_ban=hard,
         form=form,
         fused=fused,
+        message=(
+            f"elev_above_water={elev_above_water_m:.1f}m factor={elev_f:.2f}"
+            if elev_above_water_m is not None and np.isfinite(float(elev_above_water_m))
+            else ""
+        ),
     )
 
 

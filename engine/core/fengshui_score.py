@@ -763,6 +763,9 @@ def score_candidate(
     )
 
 
+from engine.core.scoring.gate import _gate_beasts_for_hole  # noqa: F401,E402
+
+
 def find_and_rank_candidates(
     dem: DEM,
     water: WaterNetwork | None = None,
@@ -773,6 +776,7 @@ def find_and_rank_candidates(
     dragon_vein=None,
     primary_dragon=None,
     return_context: bool = False,
+    require_beasts: bool = True,
 ) -> list[FusedScore] | tuple[list[FusedScore], dict[str, Any]]:
     """先定龙再点穴：主来龙入首邻域优先，综合分混入龙对齐。
 
@@ -781,6 +785,7 @@ def find_and_rank_candidates(
         dragon_vein: 可选已算好的 DragonVeinResult（避免重复 ~2min 全量龙脉）
         primary_dragon: 可选 PrimaryDragon
         return_context: True 时额外返回 {dragon_vein, primary_dragon, qi_grid}
+        require_beasts: True 时剔除少祖/四象识别失败、少祖不高于玄武的候选
     """
     from engine.core.acupoint import search_candidates
     from engine.core.dragon_vein import (
@@ -1297,8 +1302,125 @@ def find_and_rank_candidates(
 
     results.sort(key=lambda x: -x.overall)
 
-    # 热峰强制进入结果池
-    if peak_fused is not None:
+    # —— 四象/少祖门禁：识别失败剔除；少祖高于玄武顺气加分（对标优质候选）——
+    # 仅对预排前列做 detect（控时）；不足 top_k 时放宽侧砂数再扫一轮
+    if require_beasts and results:
+        pool_n = min(len(results), max(top_k * 5, 28))
+        pool = results[:pool_n]
+        gated: list[FusedScore] = []
+        rejected_n = 0
+        reject_reasons: dict[str, int] = {}
+
+        def _apply_gate(r: FusedScore, *, min_side: int, elev_hard: bool) -> bool:
+            nonlocal rejected_n
+            # 找回对应 AcupointCandidate 行号
+            crow = ccol = None
+            for c in cands:
+                if abs(c.x - r.x) < 1e-6 and abs(c.y - r.y) < 1e-6:
+                    crow, ccol = int(c.row), int(c.col)
+                    break
+            if crow is None:
+                try:
+                    crow, ccol = dem.rowcol(r.x, r.y)
+                except Exception:
+                    rejected_n += 1
+                    reject_reasons["no_rowcol"] = reject_reasons.get("no_rowcol", 0) + 1
+                    return False
+            p_loc = None
+            try:
+                # 构造临时 candidate 以 reorient 主龙
+                tmp = AcupointCandidate(
+                    row=crow, col=ccol, x=r.x, y=r.y,
+                    elevation=r.elevation, tpi=0.0, twi=0.0,
+                    form_type=r.form_type or "", form_score=0, local_slope=0.0,
+                )
+                p_loc = _primary_for_cand(tmp)
+            except Exception:
+                p_loc = primary
+            ok, reason, info = _gate_beasts_for_hole(
+                dem, crow, ccol, water,
+                primary_dragon=p_loc or primary,
+                dragon_vein=dv,
+                require_shaozu_higher=elev_hard,
+                min_side_beasts=min_side,
+            )
+            if r.meta is None:
+                r.meta = {}
+            r.meta["beasts_gate"] = info
+            r.meta["beasts_gate_reason"] = reason
+            if not ok:
+                rejected_n += 1
+                reject_reasons[reason] = reject_reasons.get(reason, 0) + 1
+                return False
+            bonus = int(info.get("shaozu_higher_bonus") or 0)
+            if bonus:
+                r.overall = clamp_score(float(r.overall) + bonus)
+                r.scores = dict(r.scores or {})
+                r.scores["shaozu_higher_bonus"] = bonus
+            return True
+
+        for r in pool:
+            if _apply_gate(r, min_side=2, elev_hard=True):
+                gated.append(r)
+        # 不足：放宽侧砂 ≥1，仍要求祖>玄
+        if len(gated) < top_k:
+            seen = {(round(g.x, 3), round(g.y, 3)) for g in gated}
+            for r in pool:
+                key = (round(r.x, 3), round(r.y, 3))
+                if key in seen:
+                    continue
+                if _apply_gate(r, min_side=1, elev_hard=True):
+                    gated.append(r)
+                    seen.add(key)
+                if len(gated) >= top_k:
+                    break
+        # 仍不足：仅要求祖+玄存在（高程仍硬），侧砂 0
+        if len(gated) < max(3, top_k // 2):
+            seen = {(round(g.x, 3), round(g.y, 3)) for g in gated}
+            for r in pool:
+                key = (round(r.x, 3), round(r.y, 3))
+                if key in seen:
+                    continue
+                if _apply_gate(r, min_side=0, elev_hard=True):
+                    gated.append(r)
+                    seen.add(key)
+                if len(gated) >= top_k:
+                    break
+
+        if gated:
+            gated.sort(key=lambda x: -x.overall)
+            results = gated
+            if peak_fused is not None:
+                # 热峰也须过门禁，否则不强制入榜
+                pf_ok = any(
+                    abs(g.x - peak_fused.x) < 1e-6 and abs(g.y - peak_fused.y) < 1e-6
+                    for g in gated
+                )
+                if not pf_ok:
+                    if _apply_gate(peak_fused, min_side=1, elev_hard=True):
+                        results.insert(0, peak_fused)
+                        results.sort(key=lambda x: -x.overall)
+                    else:
+                        peak_fused = None
+        # gated 空：保留原 results 但标 dirty（避免整局无穴）
+        else:
+            for r in results[:top_k]:
+                if r.meta is not None:
+                    r.meta["beasts_gate_relaxed"] = True
+                    r.meta["beasts_gate_reject_summary"] = dict(reject_reasons)
+
+        # 写汇总到首条 meta 便于调试
+        if results and results[0].meta is not None:
+            results[0].meta["beasts_gate_stats"] = {
+                "rejected_n": rejected_n,
+                "reasons": reject_reasons,
+                "require_beasts": True,
+            }
+
+    results.sort(key=lambda x: -x.overall)
+
+    # 热峰强制进入结果池（仅未开门禁或已通过时）
+    if peak_fused is not None and not require_beasts:
         in_list = any(
             (getattr(r, "meta") or {}).get("is_qi_peak")
             or (abs(r.x - peak_fused.x) < 1e-6 and abs(r.y - peak_fused.y) < 1e-6)
@@ -1312,6 +1434,19 @@ def find_and_rank_candidates(
                 peak_fused.overall = clamp_score(max(float(peak_fused.overall), 80))
             results.insert(0, peak_fused)
             results.sort(key=lambda x: -x.overall)
+    elif peak_fused is not None and require_beasts:
+        # 已在 gate 段处理；确保列表中热峰仍可优先
+        in_list = any(
+            (getattr(r, "meta") or {}).get("is_qi_peak")
+            or (abs(r.x - peak_fused.x) < 1e-6 and abs(r.y - peak_fused.y) < 1e-6)
+            for r in results
+        )
+        if in_list:
+            # 提到前面再分散
+            results.sort(key=lambda x: (
+                0 if (getattr(x, "meta") or {}).get("is_qi_peak") else 1,
+                -x.overall,
+            ))
 
     # 空间分散 top_k：分数优先，但相邻候选 ≥ ~320 m
     # 避免 6/9/C-001 全挤在场评最高点，明堂右侧空无一穴
