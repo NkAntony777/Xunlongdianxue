@@ -13,8 +13,9 @@
 $env:PYTHONIOENCODING = "utf-8"
 cd D:\Xunlong
 
-# 测试
-& "D:\Xunlong\engine\.venv\Scripts\python.exe" -X utf8 -m pytest engine\tests -q
+# 测试（按范围；全量较慢）
+& "D:\Xunlong\engine\.venv\Scripts\python.exe" -X utf8 scripts\run_tests.py auto
+# 全量: scripts\run_tests.py all   |  仅前端: frontend  |  仅引擎: engine
 
 # 传统模块 demo
 & "D:\Xunlong\engine\.venv\Scripts\python.exe" -X utf8 -m engine.examples.demo_traditional_modules --top-k 3

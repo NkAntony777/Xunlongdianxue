@@ -117,6 +117,60 @@
     #aoi-quality.small, #aoi-quality.large { color: #b7791f; }
     #aoi-quality.invalid { color: #c0392b; font-weight: 600; }
 
+    /* 高德对照（分析结果内） */
+    #result-amap-view {
+      position: absolute; inset: 0;
+      display: none;
+      background: #e8eaed;
+      z-index: 2;
+    }
+    #analysis-view.mode-gaode #result-amap-view { display: block; }
+    #analysis-view.mode-gaode #stage-canvas,
+    #analysis-view.mode-gaode #zoom-controls,
+    #analysis-view.mode-gaode #zoom-hint,
+    #analysis-view.mode-gaode .compass,
+    #analysis-view.mode-gaode .stage-legend {
+      display: none !important;
+    }
+    #result-amap {
+      position: absolute; inset: 0;
+      width: 100%; height: 100%;
+    }
+    .result-amap-tip {
+      position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+      z-index: 500; font-size: 12px; color: #444;
+      background: rgba(255,255,255,0.94); border: 1px solid #ddd;
+      border-radius: 4px; padding: 5px 12px;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+      pointer-events: none; white-space: nowrap;
+    }
+    .result-cand-marker {
+      background: transparent; border: 0;
+    }
+    .result-cand-pin {
+      width: 28px; height: 28px; border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 12px; font-weight: 800; color: #fff;
+      background: #e11d48; border: 2px solid #fff;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.35);
+    }
+    .result-cand-pin.selected {
+      background: #b91c1c; width: 34px; height: 34px; font-size: 13px;
+      box-shadow: 0 0 0 3px rgba(220,38,38,0.35), 0 2px 6px rgba(0,0,0,0.4);
+    }
+    .result-peak-pin {
+      width: 14px; height: 14px; border-radius: 50%;
+      background: #f0a040; border: 2px solid #fff;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+    }
+    .hint-soft {
+      margin-top: 6px; font-size: 11px; color: #8a8f96; line-height: 1.4;
+    }
+    #analysis-view.mode-gaode #basemap-modes,
+    #analysis-view.mode-gaode #basemap-mode-hint {
+      opacity: 0.45; pointer-events: none;
+    }
+
     #stage-canvas {
       position: absolute; inset: 0;
       overflow: hidden;

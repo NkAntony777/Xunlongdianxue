@@ -47,14 +47,37 @@ Get-Content -LiteralPath "xxx.json" -Encoding UTF8
 使用项目 venv：`D:\Xunlong\engine\.venv\Scripts\python.exe`
 不要用系统 Python（uv 管理、PEP 668 保护、不能装包）。
 
-### 5. 测试
+### 5. 测试（按改动范围，禁止无脑全量）
 
-每次改完代码后必须跑：
+全量 `engine/tests` 较慢。**改完只跑对应套件**；发版或跨层改动再用 `all`。
 
 ```powershell
 cd D:\Xunlong
-engine\.venv\Scripts\python.exe -m pytest engine\tests\test_engine.py -q
+$env:PYTHONIOENCODING = "utf-8"
+
+# 推荐：根据 git 改动自动选择
+engine\.venv\Scripts\python.exe scripts\run_tests.py auto
+
+# 或显式指定
+engine\.venv\Scripts\python.exe scripts\run_tests.py frontend      # 只改 frontend/
+engine\.venv\Scripts\python.exe scripts\run_tests.py engine-fast   # 公式/水法/玄空等快测
+engine\.venv\Scripts\python.exe scripts\run_tests.py engine-api    # API / 图层 / 位置
+engine\.venv\Scripts\python.exe scripts\run_tests.py engine-core   # 核心算法（含四象/龙脉）
+engine\.venv\Scripts\python.exe scripts\run_tests.py engine        # 全部引擎测试
+engine\.venv\Scripts\python.exe scripts\run_tests.py all           # 前端 + 引擎全量
+
+# 说明
+engine\.venv\Scripts\python.exe scripts\run_tests.py --list
 ```
+
+| 改动范围 | 套件 |
+|---------|------|
+| `frontend/` | `frontend`（Node，秒级） |
+| `engine/core/`、`engine/io/` | `engine-fast`（不够再 `engine-core`） |
+| `engine/api/`、`engine/llm/` | `engine-api` |
+| 多目录 / 发版 | `all` 或 `engine` |
+
+PowerShell 包装：`.\scripts\run_tests.ps1 frontend`
 
 ## 目录结构
 

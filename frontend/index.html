@@ -53,6 +53,7 @@
 
       <!-- 分析结果视图 -->
       <div id="analysis-view" class="view-panel">
+      <!-- DEM 分析图叠层（默认） -->
       <div id="stage-canvas">
         <div id="layer-stack">
           <img id="layer-basemap" class="layer-img" alt="底图" />
@@ -63,6 +64,11 @@
           <img id="layer-contours" class="layer-img" alt="等高线" style="opacity:0.88;" />
           <svg id="overlay" preserveAspectRatio="xMidYMid meet"></svg>
         </div>
+      </div>
+      <!-- 高德对照：地址标注底图 + 热力/穴点 -->
+      <div id="result-amap-view">
+        <div id="result-amap"></div>
+        <div class="result-amap-tip">高德路网 · 可切换热力/水系等分析场 · 点击穴点查看详情</div>
       </div>
 
       <div class="compass" title="坐向罗盘">
@@ -113,11 +119,17 @@
 
     <aside id="panel">
       <div class="section">
-        <h3>底图</h3>
+        <h3>对照底图</h3>
+        <div class="pill-row" id="display-modes">
+          <button class="pill active" data-display="analysis" type="button">分析图</button>
+          <button class="pill" data-display="gaode" type="button">高德地图</button>
+        </div>
+        <div class="divider"></div>
         <div class="pill-row" id="basemap-modes">
           <button class="pill active" data-mode="elevation" type="button">高程</button>
           <button class="pill" data-mode="slope" type="button">坡度</button>
         </div>
+        <div class="hint-soft" id="basemap-mode-hint">分析图底图类型（高程/坡度）</div>
       </div>
 
       <div class="section">
