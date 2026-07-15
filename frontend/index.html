@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>寻龙点穴引擎 — Xunlong</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22><text y=%2213%22 font-size=%2214%22>龙</text></svg>" />
+  <link rel="stylesheet" href="/assets/leaflet.css" />
+  <link rel="stylesheet" href="/static/css/app.css" />
+</head>
+<body>
+<header id="titlebar">
+    <div class="left">
+      <h1 id="page-title">寻龙点穴引擎</h1>
+      <div class="sub" id="page-sub">高德圈选分析区 · 在线 DEM/水系 · 四象主轴算法评价</div>
+    </div>
+    <div class="tools">
+      <div id="search-box">
+        <input id="search-input" type="text" placeholder="换地点搜索…" autocomplete="off" />
+        <div id="search-results"></div>
+      </div>
+      <span class="tool-label">半径</span>
+      <input id="radius-slider" type="range" min="3" max="25" value="8" step="0.5" />
+      <span id="radius-value">8.0 km</span>
+      <span id="aoi-quality" class="ok">合适</span>
+      <div class="mode-tabs" id="mode-tabs">
+        <button type="button" class="active" data-view="map">高德圈选</button>
+        <button type="button" data-view="analysis" id="tab-analysis" disabled>分析结果</button>
+      </div>
+      <button class="btn primary" id="btn-analyze" type="button">开始分析</button>
+      <button class="btn" id="btn-demo" type="button">阆中 Demo</button>
+      <span id="status-text"></span>
+    </div>
+  </header>
+
+  <main>
+    <section id="stage">
+      <!-- 高德底图：自由缩放平移 + 圈选分析区 -->
+      <div id="amap-view" class="view-panel active">
+        <div id="amap"></div>
+        <div class="amap-tip">拖动中心点 · 拖动边缘白点改半径 · 滚轮缩放地图 · 双击设中心</div>
+        <div class="amap-hud" id="amap-hud">
+          <div><b>分析区 (AOI)</b></div>
+          <div id="hud-center">中心: —</div>
+          <div id="hud-radius">半径: —</div>
+          <div id="hud-quality">尺度: —</div>
+          <div style="margin-top:4px;color:#888;font-size:10.5px">
+            允许 3–25 km · 推荐 5–15 km<br/>
+            （朝山 1–5 km，过小四象失真）
+          </div>
+        </div>
+      </div>
+
+      <!-- 分析结果视图 -->
+      <div id="analysis-view" class="view-panel">
+      <div id="stage-canvas">
+        <div id="layer-stack">
+          <img id="layer-basemap" class="layer-img" alt="底图" />
+          <img id="layer-influence" class="layer-img" alt="水煞" style="opacity:0.85;" />
+          <img id="layer-buildings" class="layer-img" alt="可建城" style="opacity:0.9;" />
+          <img id="layer-score" class="layer-img" alt="评分" style="opacity:0.78;" />
+          <img id="layer-water" class="layer-img" alt="水系" />
+          <img id="layer-contours" class="layer-img" alt="等高线" style="opacity:0.88;" />
+          <svg id="overlay" preserveAspectRatio="xMidYMid meet"></svg>
+        </div>
+      </div>
+
+      <div class="compass" title="坐向罗盘">
+        <svg viewBox="0 0 100 100">
+          <circle cx="50" cy="50" r="46" fill="rgba(255,255,255,0.5)" stroke="#b8bdc4" stroke-width="1"/>
+          <circle cx="50" cy="50" r="38" fill="none" stroke="#d0d4d8" stroke-width="0.6"/>
+          <g id="compass-arrow" class="arrow">
+            <line x1="50" y1="50" x2="50" y2="16" stroke="#c0392b" stroke-width="2.4"/>
+            <polygon points="45.5,20 54.5,20 50,9" fill="#c0392b"/>
+            <line x1="50" y1="50" x2="50" y2="84" stroke="#2a2a2a" stroke-width="1.3"/>
+            <circle cx="50" cy="50" r="2.2" fill="#2a2a2a"/>
+          </g>
+          <text x="50" y="11" text-anchor="middle" font-size="11" font-weight="700" fill="#1a1a1a">北</text>
+          <text x="50" y="96" text-anchor="middle" font-size="10" fill="#666">南</text>
+          <text x="8"  y="54" text-anchor="middle" font-size="10" fill="#666">西</text>
+          <text x="92" y="54" text-anchor="middle" font-size="10" fill="#666">东</text>
+        </svg>
+      </div>
+
+      <div class="stage-legend">
+        <div><span class="swatch influence"></span>紫灰：水煞影响带</div>
+        <div><span class="swatch buildable"></span>可建城实际覆盖片区</div>
+      </div>
+
+      <div id="zoom-controls" title="地图缩放">
+        <button type="button" id="zoom-in" title="放大 (滚轮向上)">+</button>
+        <button type="button" id="zoom-out" title="缩小 (滚轮向下)">−</button>
+        <button type="button" id="zoom-reset" title="重置视图">⟲</button>
+        <div class="zoom-level" id="zoom-level">100%</div>
+      </div>
+      <div id="zoom-hint">滚轮缩放 · 拖拽平移 · 双击重置</div>
+
+      </div><!-- /analysis-view -->
+
+      <div id="loading" class="hide">
+        <div id="loading-card">
+          <div id="loading-title">
+            <div class="spin"></div>
+            <span id="loading-text">分析中…</span>
+          </div>
+          <div id="loading-sub">请稍候，正在准备数据</div>
+          <div id="loading-bar-track"><div id="loading-bar"></div></div>
+          <div id="loading-pct">0%</div>
+          <ul id="loading-steps"></ul>
+        </div>
+      </div>
+    </section>
+
+    <aside id="panel">
+      <div class="section">
+        <h3>底图</h3>
+        <div class="pill-row" id="basemap-modes">
+          <button class="pill active" data-mode="elevation" type="button">高程</button>
+          <button class="pill" data-mode="slope" type="button">坡度</button>
+        </div>
+      </div>
+
+      <div class="section">
+        <h3>分析场</h3>
+        <div class="pill-row" id="analysis-primary">
+          <button class="pill active" data-layer="score" type="button">风水得分</button>
+        </div>
+        <div class="divider"></div>
+        <div class="pill-row" id="analysis-toggles">
+          <button class="pill soft active" data-layer="contours" type="button">等高线</button>
+          <button class="pill soft active" data-layer="water" type="button">水系</button>
+          <button class="pill soft active" data-layer="influence" type="button">水煞带</button>
+          <button class="pill soft active" data-layer="buildings" type="button">可建城</button>
+          <button class="pill soft active" data-layer="beasts" type="button">四象</button>
+          <button class="pill soft" data-layer="candidates" type="button">候选穴</button>
+          <button class="pill soft" data-layer="ridges" type="button">龙脉</button>
+          <button class="pill soft active" data-layer="peak" type="button">场评点</button>
+        </div>
+      </div>
+
+      <div class="section">
+        <h3>视图</h3>
+        <a class="view-link" id="btn-3d" href="javascript:void(0)">打开三维可旋转地形</a>
+      </div>
+
+      <div class="section">
+        <h3>DEM 信息</h3>
+        <div class="info-block" id="dem-info"><div class="empty">加载中…</div></div>
+      </div>
+
+      <div class="section">
+        <h3>四象与主轴</h3>
+        <div class="beast-list" id="beast-list"><div class="empty">加载中…</div></div>
+      </div>
+
+      <div class="section">
+        <h3>候选穴</h3>
+        <div class="cand-list" id="cand-list"><div class="empty">加载中…</div></div>
+        <div class="cand-detail" id="cand-detail" style="display:none;"></div>
+      </div>
+    </aside>
+  </main>
+  <script src="/assets/leaflet.js"></script>
+  <script type="module" src="/static/js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,125 @@
+{
+  "metadata": {
+    "generated_at": "2026-07-14T11:21:02",
+    "dem": "D:/Xunlong/data/langzhong_dem.tif",
+    "water": "D:/Xunlong/data/langzhong_rivers.geojson",
+    "bbox": [
+      11783168.100468006,
+      3697882.743225223,
+      11799827.163187167,
+      3717454.866091996
+    ],
+    "resolution_m": 91.03312961289699,
+    "terrain": {
+      "mean_elevation": 400.5729788407594,
+      "relief": 382.95301475666304,
+      "mean_slope": 1.4407706123197874,
+      "dominant_aspect": "西南",
+      "terrain_position": "缓坡台地"
+    }
+  },
+  "candidates": [
+    {
+      "id": "C-006",
+      "rank": 1,
+      "x": 11797369.268687617,
+      "y": 3711446.679537545,
+      "elevation_m": 348.98339500811704,
+      "form_type": "窝穴",
+      "overall_score": 67,
+      "scores": {
+        "four_beasts": 41,
+        "form": 95,
+        "sand": 55,
+        "water": 46,
+        "openness": 98,
+        "stability": 95
+      },
+      "geography": {
+        "tpi": -1.5,
+        "twi": 0.0,
+        "local_slope": 0.46,
+        "back_mountain_height_m": null,
+        "back_mountain_distance_m": null,
+        "nearest_water_m": null,
+        "nearest_water_dir": "西南",
+        "qinglong": 4,
+        "baihu": 30,
+        "zhuque": 97,
+        "xuanwu": 32
+      },
+      "messages": {
+        "sand": "玄武靠山：高 nan m 距 nan m（30）；左砂 2 个峰（100）；右砂 0 个峰（20）；案山 1 个（90）；朝山 0 个（70）",
+        "water": "最近水体位于西南侧约 inf m，距离较远，水系对场地格局影响有限，得水评分 46。"
+      }
+    },
+    {
+      "id": "C-032",
+      "rank": 2,
+      "x": 11791452.11526278,
+      "y": 3702798.5322243194,
+      "elevation_m": 282.45474959012,
+      "form_type": "窝穴",
+      "overall_score": 67,
+      "scores": {
+        "four_beasts": 35,
+        "form": 94,
+        "sand": 65,
+        "water": 46,
+        "openness": 94,
+        "stability": 95
+      },
+      "geography": {
+        "tpi": -1.6,
+        "twi": 0.0,
+        "local_slope": 1.22,
+        "back_mountain_height_m": 290.9,
+        "back_mountain_distance_m": 643.7,
+        "nearest_water_m": null,
+        "nearest_water_dir": "西南",
+        "qinglong": 11,
+        "baihu": 1,
+        "zhuque": 92,
+        "xuanwu": 35
+      },
+      "messages": {
+        "sand": "玄武靠山：高 290.9 m 距 644 m（24）；左砂 2 个峰（100）；右砂 2 个峰（100）；案山 2 个（75）；朝山 0 个（70）",
+        "water": "最近水体位于西南侧约 inf m，距离较远，水系对场地格局影响有限，得水评分 46。"
+      }
+    },
+    {
+      "id": "C-003",
+      "rank": 3,
+      "x": 11798279.599983746,
+      "y": 3716908.6673143185,
+      "elevation_m": 346.23822212208546,
+      "form_type": "窝穴",
+      "overall_score": 66,
+      "scores": {
+        "four_beasts": 34,
+        "form": 95,
+        "sand": 55,
+        "water": 46,
+        "openness": 98,
+        "stability": 95
+      },
+      "geography": {
+        "tpi": -1.52,
+        "twi": 0.0,
+        "local_slope": 0.74,
+        "back_mountain_height_m": 352.3,
+        "back_mountain_distance_m": 455.2,
+        "nearest_water_m": null,
+        "nearest_water_dir": "西南",
+        "qinglong": 6,
+        "baihu": 0,
+        "zhuque": 96,
+        "xuanwu": 33
+      },
+      "messages": {
+        "sand": "玄武靠山：高 352.3 m 距 455 m（42）；左砂 1 个峰（75）；右砂 0 个峰（20）；案山 1 个（90）；朝山 0 个（70）",
+        "water": "最近水体位于西南侧约 inf m，距离较远，水系对场地格局影响有限，得水评分 46。"
+      }
+    }
+  ]
+}

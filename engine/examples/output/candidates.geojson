@@ -1,0 +1,425 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          990.0,
+          3960.0
+        ]
+      },
+      "properties": {
+        "id": "C-006",
+        "rank": 1,
+        "overall_score": 70,
+        "elevation_m": 535.551513671875,
+        "form_type": "窝穴",
+        "scores": {
+          "four_beasts": 40,
+          "form": 95,
+          "sand": 51,
+          "water": 78,
+          "openness": 84,
+          "stability": 95
+        },
+        "geography": {
+          "tpi": -1.52,
+          "twi": 0.0,
+          "local_slope": 3.9,
+          "back_mountain_height_m": null,
+          "back_mountain_distance_m": null,
+          "nearest_water_m": 1145.3,
+          "nearest_water_dir": "东",
+          "qinglong": 10,
+          "baihu": 30,
+          "zhuque": 76,
+          "xuanwu": 43
+        },
+        "messages": {
+          "sand": "玄武靠山：高 nan m 距 nan m（30）；左砂 0 个峰（20）；右砂 1 个峰（75）；案山 1 个（90）；朝山 0 个（70）",
+          "water": "最近水体位于东侧约 1145 m，距离较近，可作为周边水系环境参考，得水评分 78。"
+        }
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          2190.0,
+          2460.0
+        ]
+      },
+      "properties": {
+        "id": "C-009",
+        "rank": 2,
+        "overall_score": 70,
+        "elevation_m": 517.4114379882812,
+        "form_type": "窝穴",
+        "scores": {
+          "four_beasts": 41,
+          "form": 95,
+          "sand": 51,
+          "water": 78,
+          "openness": 88,
+          "stability": 95
+        },
+        "geography": {
+          "tpi": -1.5,
+          "twi": 0.0,
+          "local_slope": 2.7,
+          "back_mountain_height_m": 544.0,
+          "back_mountain_distance_m": 658.0,
+          "nearest_water_m": 1915.3,
+          "nearest_water_dir": "东北",
+          "qinglong": 13,
+          "baihu": 30,
+          "zhuque": 85,
+          "xuanwu": 37
+        },
+        "messages": {
+          "sand": "玄武靠山：高 544.0 m 距 658 m（30）；左砂 0 个峰（20）；右砂 1 个峰（75）；案山 1 个（90）；朝山 0 个（70）",
+          "water": "最近水体位于东北侧约 1915 m，距离较近，可作为周边水系环境参考，得水评分 78。"
+        }
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          1440.0,
+          2610.0
+        ]
+      },
+      "properties": {
+        "id": "C-036",
+        "rank": 3,
+        "overall_score": 70,
+        "elevation_m": 503.12493896484375,
+        "form_type": "窝穴",
+        "scores": {
+          "four_beasts": 41,
+          "form": 94,
+          "sand": 51,
+          "water": 78,
+          "openness": 89,
+          "stability": 95
+        },
+        "geography": {
+          "tpi": -1.67,
+          "twi": 0.0,
+          "local_slope": 2.14,
+          "back_mountain_height_m": null,
+          "back_mountain_distance_m": null,
+          "nearest_water_m": 1944.7,
+          "nearest_water_dir": "东北",
+          "qinglong": 15,
+          "baihu": 30,
+          "zhuque": 86,
+          "xuanwu": 33
+        },
+        "messages": {
+          "sand": "玄武靠山：高 nan m 距 nan m（30）；左砂 0 个峰（20）；右砂 1 个峰（75）；案山 1 个（90）；朝山 0 个（70）",
+          "water": "最近水体位于东北侧约 1945 m，距离较近，可作为周边水系环境参考，得水评分 78。"
+        }
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          4740.0,
+          5760.0
+        ]
+      },
+      "properties": {
+        "id": "C-001",
+        "rank": 4,
+        "overall_score": 69,
+        "elevation_m": 545.505615234375,
+        "form_type": "窝穴",
+        "scores": {
+          "four_beasts": 38,
+          "form": 95,
+          "sand": 43,
+          "water": 86,
+          "openness": 88,
+          "stability": 95
+        },
+        "geography": {
+          "tpi": -1.53,
+          "twi": 0.0,
+          "local_slope": 3.04,
+          "back_mountain_height_m": null,
+          "back_mountain_distance_m": null,
+          "nearest_water_m": 855.1,
+          "nearest_water_dir": "西南",
+          "qinglong": 26,
+          "baihu": 3,
+          "zhuque": 84,
+          "xuanwu": 41
+        },
+        "messages": {
+          "sand": "玄武靠山：高 nan m 距 nan m（30）；左砂 1 个峰（75）；右砂 0 个峰（20）；案山 0 个（40）；朝山 0 个（70）",
+          "water": "最近水体位于西南侧约 855 m，距离适中，具备较好的近水环境条件，得水评分 86。"
+        }
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          840.0,
+          5610.0
+        ]
+      },
+      "properties": {
+        "id": "C-003",
+        "rank": 5,
+        "overall_score": 69,
+        "elevation_m": 533.7659912109375,
+        "form_type": "窝穴",
+        "scores": {
+          "four_beasts": 40,
+          "form": 95,
+          "sand": 43,
+          "water": 78,
+          "openness": 92,
+          "stability": 95
+        },
+        "geography": {
+          "tpi": -1.55,
+          "twi": 0.0,
+          "local_slope": 2.1,
+          "back_mountain_height_m": null,
+          "back_mountain_distance_m": null,
+          "nearest_water_m": 1605.5,
+          "nearest_water_dir": "东",
+          "qinglong": 5,
+          "baihu": 30,
+          "zhuque": 89,
+          "xuanwu": 38
+        },
+        "messages": {
+          "sand": "玄武靠山：高 nan m 距 nan m（30）；左砂 0 个峰（20）；右砂 1 个峰（75）；案山 0 个（40）；朝山 0 个（70）",
+          "water": "最近水体位于东侧约 1606 m，距离较近，可作为周边水系环境参考，得水评分 78。"
+        }
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          240.0,
+          4110.0
+        ]
+      },
+      "properties": {
+        "id": "C-005",
+        "rank": 6,
+        "overall_score": 69,
+        "elevation_m": 513.2080078125,
+        "form_type": "窝穴",
+        "scores": {
+          "four_beasts": 41,
+          "form": 95,
+          "sand": 41,
+          "water": 78,
+          "openness": 92,
+          "stability": 95
+        },
+        "geography": {
+          "tpi": -1.53,
+          "twi": 0.0,
+          "local_slope": 1.55,
+          "back_mountain_height_m": null,
+          "back_mountain_distance_m": null,
+          "nearest_water_m": 1802.7,
+          "nearest_water_dir": "东",
+          "qinglong": 8,
+          "baihu": 30,
+          "zhuque": 89,
+          "xuanwu": 37
+        },
+        "messages": {
+          "sand": "玄武靠山：高 nan m 距 nan m（30）；左砂 0 个峰（20）；右砂 0 个峰（20）；案山 1 个（90）；朝山 0 个（70）",
+          "water": "最近水体位于东侧约 1803 m，距离较近，可作为周边水系环境参考，得水评分 78。"
+        }
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          390.0,
+          3810.0
+        ]
+      },
+      "properties": {
+        "id": "C-007",
+        "rank": 7,
+        "overall_score": 69,
+        "elevation_m": 511.84564208984375,
+        "form_type": "窝穴",
+        "scores": {
+          "four_beasts": 40,
+          "form": 95,
+          "sand": 41,
+          "water": 78,
+          "openness": 92,
+          "stability": 95
+        },
+        "geography": {
+          "tpi": -1.58,
+          "twi": 0.0,
+          "local_slope": 1.81,
+          "back_mountain_height_m": null,
+          "back_mountain_distance_m": null,
+          "nearest_water_m": 1751.6,
+          "nearest_water_dir": "东",
+          "qinglong": 7,
+          "baihu": 30,
+          "zhuque": 89,
+          "xuanwu": 35
+        },
+        "messages": {
+          "sand": "玄武靠山：高 nan m 距 nan m（30）；左砂 0 个峰（20）；右砂 0 个峰（20）；案山 1 个（90）；朝山 0 个（70）",
+          "water": "最近水体位于东侧约 1752 m，距离较近，可作为周边水系环境参考，得水评分 78。"
+        }
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          240.0,
+          3210.0
+        ]
+      },
+      "properties": {
+        "id": "C-008",
+        "rank": 8,
+        "overall_score": 69,
+        "elevation_m": 502.53271484375,
+        "form_type": "窝穴",
+        "scores": {
+          "four_beasts": 40,
+          "form": 95,
+          "sand": 41,
+          "water": 78,
+          "openness": 93,
+          "stability": 95
+        },
+        "geography": {
+          "tpi": -1.53,
+          "twi": 0.0,
+          "local_slope": 1.68,
+          "back_mountain_height_m": null,
+          "back_mountain_distance_m": null,
+          "nearest_water_m": 2182.1,
+          "nearest_water_dir": "东北",
+          "qinglong": 6,
+          "baihu": 30,
+          "zhuque": 92,
+          "xuanwu": 32
+        },
+        "messages": {
+          "sand": "玄武靠山：高 nan m 距 nan m（30）；左砂 0 个峰（20）；右砂 0 个峰（20）；案山 1 个（90）；朝山 0 个（70）",
+          "water": "最近水体位于东北侧约 2182 m，距离较近，可作为周边水系环境参考，得水评分 78。"
+        }
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          1740.0,
+          960.0
+        ]
+      },
+      "properties": {
+        "id": "C-012",
+        "rank": 9,
+        "overall_score": 69,
+        "elevation_m": 481.4288330078125,
+        "form_type": "窝穴",
+        "scores": {
+          "four_beasts": 41,
+          "form": 95,
+          "sand": 51,
+          "water": 66,
+          "openness": 92,
+          "stability": 95
+        },
+        "geography": {
+          "tpi": -1.56,
+          "twi": 0.0,
+          "local_slope": 1.76,
+          "back_mountain_height_m": null,
+          "back_mountain_distance_m": null,
+          "nearest_water_m": 3468.8,
+          "nearest_water_dir": "北",
+          "qinglong": 9,
+          "baihu": 30,
+          "zhuque": 90,
+          "xuanwu": 34
+        },
+        "messages": {
+          "sand": "玄武靠山：高 nan m 距 nan m（30）；左砂 0 个峰（20）；右砂 1 个峰（75）；案山 1 个（90）；朝山 0 个（70）",
+          "water": "最近水体位于北侧约 3469 m，距离偏远，得水关系较弱，得水评分 66。"
+        }
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          240.0,
+          5310.0
+        ]
+      },
+      "properties": {
+        "id": "C-023",
+        "rank": 10,
+        "overall_score": 69,
+        "elevation_m": 523.4986572265625,
+        "form_type": "窝穴",
+        "scores": {
+          "four_beasts": 41,
+          "form": 94,
+          "sand": 43,
+          "water": 78,
+          "openness": 93,
+          "stability": 95
+        },
+        "geography": {
+          "tpi": -1.63,
+          "twi": 0.0,
+          "local_slope": 1.58,
+          "back_mountain_height_m": null,
+          "back_mountain_distance_m": null,
+          "nearest_water_m": 1937.4,
+          "nearest_water_dir": "东",
+          "qinglong": 7,
+          "baihu": 30,
+          "zhuque": 92,
+          "xuanwu": 34
+        },
+        "messages": {
+          "sand": "玄武靠山：高 nan m 距 nan m（30）；左砂 0 个峰（20）；右砂 1 个峰（75）；案山 0 个（40）；朝山 0 个（70）",
+          "water": "最近水体位于东侧约 1937 m，距离较近，可作为周边水系环境参考，得水评分 78。"
+        }
+      }
+    }
+  ]
+}

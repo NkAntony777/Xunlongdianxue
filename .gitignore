@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+.venv/
+venv/
+.env
+.env.*
+
+# Tests / cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Runtime logs & temp
+*.log
+engine/server.log
+engine/server.err.log
+engine/_tmp_uploads/
+*.tmp
+
+# Playwright / agent local
+.playwright-mcp/
+terminals/
+mcps/
+
+# Large local DEM / derived rasters (keep small fixtures)
+*.tif
+*.tiff
+!engine/tests/fixtures/**/*.tif
+
+# Optional large local data dumps
+engine/data/
+data/**/*.tif
+data/**/*.tiff
+data/**/*.zip
+data/**/*.7z
+
+# Node (if any)
+node_modules/
+
+# Nested third-party clones (document in third_party/README only)
+third_party/shanshui-mingtang-fengshui-gis/
+third_party/yijing-fengshui/

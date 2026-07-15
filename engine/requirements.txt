@@ -1,0 +1,11 @@
+# 寻龙点穴引擎依赖
+numpy>=1.24
+scipy>=1.10
+rasterio>=1.3
+geopandas>=0.14
+shapely>=2.0
+scikit-image>=0.20
+matplotlib>=3.7
+pyproj>=3.5
+fiona>=1.9
+# pysheds 是可选加速（默认走 numpy 回退）
