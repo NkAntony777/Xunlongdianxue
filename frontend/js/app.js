@@ -9,18 +9,26 @@ import {
   switchView, wireAoiControls, setViewChangeHandler,
 } from "./aoi.js";
 import { wireAnalysisMap, onAnalysisViewShown } from "./analysis-map.js";
-import { wireLayerToggles } from "./render-ui.js";
+import { wireLayerToggles, selectCandidate } from "./render-ui.js";
 import { wireAnalysisButtons, reloadBasemap } from "./analysis.js";
 import { wireSearch } from "./search.js";
+import {
+  wireResultMap, onResultMapShown, setCandidateSelectHandler,
+} from "./result-map.js";
 
 async function boot() {
   setViewChangeHandler((view) => {
-    if (view === "analysis") onAnalysisViewShown();
+    if (view === "analysis") {
+      onAnalysisViewShown();
+      onResultMapShown();
+    }
   });
   wireLayerToggles.onBasemapChange = () => reloadBasemap();
+  setCandidateSelectHandler((id) => selectCandidate(id));
 
   wireAoiControls();
   wireAnalysisMap();
+  wireResultMap();
   wireLayerToggles();
   wireAnalysisButtons();
   wireSearch();
@@ -35,6 +43,8 @@ async function boot() {
   initAmap();
   setRadiusKm(state.radius_km);
   updateAoiHud();
+  // 分析视图默认「分析图」模式 class
+  $("analysis-view")?.classList.add("mode-analysis");
   switchView("map");
   setStatus("在高德图上圈选分析区（推荐 5–15 km），然后点「开始分析」");
   if ($("page-sub")) {

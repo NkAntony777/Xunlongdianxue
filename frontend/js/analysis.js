@@ -49,6 +49,8 @@ export async function loadLocalDemo() {
     state.demPath = demPath;
     state.waterPath = waterPath;
     state.mode = "demo";
+    // 阆中 Demo 经纬度范围（与 renderDemInfo 一致）
+    state.bboxLonLat = [105.85, 31.5, 106.0, 31.65];
     applyAll(layers);
     markAnalysisReady();
     setProgress(3, "done");
@@ -140,6 +142,7 @@ export async function runOnlineAnalysis() {
     state.mode = "online";
     state.demPath = tifPath;
     state.waterPath = waterPath;
+    if (elev.bbox_lonlat) state.bboxLonLat = elev.bbox_lonlat;
     applyAll(layers, elev);
     markAnalysisReady();
     setProgress(5, "done");

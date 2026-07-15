@@ -7,10 +7,19 @@ import { state } from "./state.js";
 import { $, fmt, esc, setStatus } from "./utils.js";
 import { fitLayerStack, showZoomHint } from "./analysis-map.js";
 import { fetchFourBeastsAt } from "./api.js";
+import {
+  storeLayerImagesFromPayload,
+  refreshResultMapOverlays,
+  updateResultMapAnnotations,
+  syncResultMap,
+} from "./result-map.js";
 
 export function applyAll(layers, elevMeta) {
   state.bbox = layers.bbox;
   state.dem = layers.dem;
+  if (elevMeta && elevMeta.bbox_lonlat) {
+    state.bboxLonLat = elevMeta.bbox_lonlat;
+  }
   const fb = layers.structured?.four_beasts || null;
   state.fb = fb;
   state.fbPeak = fb ? JSON.parse(JSON.stringify(fb)) : null;
@@ -78,6 +87,10 @@ export function applyAll(layers, elevMeta) {
   const arrow = $("compass-arrow");
   if (arrow) arrow.style.transform = `rotate(${state.facing || 0}deg)`;
   showZoomHint();
+  // 若用户已在高德对照模式，同步叠加热力与穴点
+  if (state.displayMode === "gaode") {
+    syncResultMap(true);
+  }
 }
 
 export function applyLayerImages(d) {
@@ -98,6 +111,7 @@ export function applyLayerImages(d) {
   set("layer-influence", d.water_influence);
   set("layer-buildings", d.buildings);
   set("layer-score", d.score);
+  storeLayerImagesFromPayload(d);
   applyLayerVisibility();
 }
 
@@ -115,6 +129,9 @@ export function applyLayerVisibility() {
     if (!el) continue;
     if (!el.getAttribute("src")) { el.style.display = "none"; continue; }
     el.style.display = on ? "block" : "none";
+  }
+  if (state.displayMode === "gaode") {
+    refreshResultMapOverlays();
   }
 }
 
@@ -162,6 +179,7 @@ function restorePeakBeasts() {
   renderCandList();
   renderCandDetail();
   renderOverlay();
+  updateResultMapAnnotations();
 }
 
 /** 选中候选穴：拉四象并刷新图/侧栏；再点取消则回到场评最高点 */
@@ -201,6 +219,7 @@ export async function selectCandidate(candId) {
     renderCandList();
     renderCandDetail();
     renderOverlay();
+    updateResultMapAnnotations();
     setStatus(`四象：${c.id}（缓存）`, "ok");
     return;
   }
@@ -209,6 +228,7 @@ export async function selectCandidate(candId) {
   renderBeastList();
   renderCandList();
   renderOverlay();
+  updateResultMapAnnotations();
   setStatus(`计算 ${c.id} 的四象…`);
 
   try {
@@ -224,6 +244,7 @@ export async function selectCandidate(candId) {
     renderCandList();
     renderCandDetail();
     renderOverlay();
+    updateResultMapAnnotations();
     setStatus(`四象已更新 · 穴心 ${c.id}`, "ok");
   } catch (e) {
     console.error(e);
@@ -552,8 +573,12 @@ export function wireLayerToggles() {
       btn.classList.toggle("active");
       const layer = btn.dataset.layer;
       state.layerVisible[layer] = btn.classList.contains("active");
-      if (["beasts", "candidates", "ridges", "peak"].includes(layer)) renderOverlay();
-      else applyLayerVisibility();
+      if (["beasts", "candidates", "ridges", "peak"].includes(layer)) {
+        renderOverlay();
+        updateResultMapAnnotations();
+      } else {
+        applyLayerVisibility();
+      }
     });
   }
   wire("analysis-primary");

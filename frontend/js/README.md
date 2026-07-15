@@ -18,9 +18,13 @@ frontend/
     ├── progress.js     # 分步加载 UI
     ├── aoi.js          # 高德圈选 AOI
     ├── analysis-map.js # 分析结果画布平移缩放
+    ├── result-map.js   # 高德对照：热力 imageOverlay + 穴点
+    ├── geo.js          # 纯地理坐标工具（无 DOM，可单测）
     ├── render-ui.js    # 图层 / SVG / 右侧面板
     ├── analysis.js     # Demo / 在线分析流程
     └── search.js       # 地点搜索
+frontend/tests/
+└── run.mjs             # 前端轻测（node frontend/tests/run.mjs）
 ```
 
 ## 依赖关系（简）
@@ -29,9 +33,19 @@ frontend/
 app.js
  ├─ aoi.js ── api.js, state, utils
  ├─ analysis-map.js ── state, utils
- ├─ render-ui.js ── analysis-map, config, state
+ ├─ result-map.js ── geo.js, state, utils（候选点选回调由 app 注入）
+ ├─ render-ui.js ── analysis-map, result-map, config, state
  ├─ analysis.js ── api, progress, aoi, render-ui
  └─ search.js ── api, aoi
+```
+
+## 前端测试
+
+```powershell
+# 单独跑前端
+node frontend/tests/run.mjs
+# 或经统一入口
+engine\.venv\Scripts\python.exe scripts\run_tests.py frontend
 ```
 
 ## 约定
