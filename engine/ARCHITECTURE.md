@@ -45,3 +45,16 @@ from engine.core.scoring.gate import _gate_beasts_for_hole
 - `scoring/candidate.py`, `scoring/rank.py`, `scoring/serialize.py`
 - `pipeline/analyze_aoi.py` thin layers router
 - Split `dragon_vein.py` into hydro / ridge / primary
+
+## PR-2 scoring split
+
+| Module | Role |
+|--------|------|
+| `scoring.weights` | DEFAULT_WEIGHTS |
+| `scoring.candidate` | score_candidate, FusedScore |
+| `scoring.gate` | beasts gate |
+| `scoring.rank` | find_and_rank_candidates |
+| `scoring.serialize` | to_geojson / to_json / _sanitize |
+| `pipeline.analyze_aoi` | AOI use-case without HTTP |
+
+`engine.core.fengshui_score` remains a thin re-export facade.
