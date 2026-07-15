@@ -58,3 +58,20 @@ from engine.core.scoring.gate import _gate_beasts_for_hole
 | `pipeline.analyze_aoi` | AOI use-case without HTTP |
 
 `engine.core.fengshui_score` remains a thin re-export facade.
+
+## PR-3 dragon split
+
+| Module | Role |
+|--------|------|
+| `core.dragon.types` | RidgeLine, PrimaryDragon, … |
+| `core.dragon.hydro` | flats / D8 / accumulation |
+| `core.dragon.ridge` | extract / vectorize / light mask |
+| `core.dragon.entrance` | entrance refine |
+| `core.dragon.yaoxia` | 过峡 |
+| `core.dragon.primary` | select / reorient / alignment |
+| `core.dragon.incoming` | shaozu/xuanwu on ridge |
+| `core.dragon.analyze` | analyze_dragon_vein |
+| `core.dragon.viewshed` | viewshed + dual anchor |
+| `core.dragon_vein` | thin re-export facade |
+
+`pipeline.analyze_aoi` + `structured_from_aoi` power `/api/layers` structured block.

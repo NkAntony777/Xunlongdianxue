@@ -173,187 +173,23 @@ def _all_structured_layers(
     center_row: int | None = None,
     center_col: int | None = None,
 ) -> dict[str, Any]:
-    """结构化图层：先定龙 → 点穴排名 → 四象（共用同一龙脉结果）。
+    """结构化图层：委托 pipeline.analyze_aoi（先龙后穴后四象）。
 
-    默认穴心 = 龙对齐后的 top1 候选；显式 center_* 仍可覆盖。
+    默认穴心 = 场评热峰；显式 center_* 仍可覆盖。
     """
-    from engine.core.dragon_vein import analyze_dragon_vein, select_primary_dragon
+    from engine.pipeline.analyze_aoi import analyze_aoi, structured_from_aoi
 
-    # —— 1) 全量提脊（只跑一次）；主龙在 find_and_rank 内按热峰锚选 ——
-    dv = None
-    try:
-        dv = analyze_dragon_vein(dem, min_length_m=120.0, water=water)
-    except Exception:
-        dv = None
-
-    # —— 2) 点穴排名：热峰锚选龙 + qi 主导 + 热峰保送 ——
-    results, ctx = find_and_rank_candidates(
-        dem, water, top_k=req.top_k, min_score=0,
-        dragon_vein=dv, primary_dragon=None, return_context=True,
-    )
-    dv = ctx.get("dragon_vein") or dv
-    primary = ctx.get("primary_dragon")
-    qi_grid = ctx.get("qi_grid") if score_grid is None else score_grid
-    qi_peak_rc = ctx.get("qi_peak_rowcol")
-
-    # —— 3) 穴心：显式 > 真·场评热峰 > top1 ——
-    # 用户认定橙心=理论最优，默认四象/标签应对齐热峰
-    center_source = "dem_center"
-    if center_row is not None and center_col is not None:
-        center_row = int(np.clip(center_row, 0, dem.height - 1))
-        center_col = int(np.clip(center_col, 0, dem.width - 1))
-        center_source = "explicit"
-    elif qi_peak_rc is not None:
-        center_row, center_col = int(qi_peak_rc[0]), int(qi_peak_rc[1])
-        center_source = "score_field_peak"
-        # 主龙再相对热峰定向一次（与排名一致）
-        if primary is not None:
-            try:
-                from engine.core.dragon_vein import reorient_primary_to_hole
-                primary = reorient_primary_to_hole(
-                    dem, primary, center_row, center_col, water=water,
-                )
-            except Exception:
-                pass
-    elif results:
-        from rasterio.transform import rowcol
-        top = results[0]
-        try:
-            crow, ccol = rowcol(dem.transform, top.x, top.y)
-            center_row, center_col = int(crow), int(ccol)
-            center_source = "top_candidate"
-        except Exception:
-            center_row, center_col = dem.height // 2, dem.width // 2
-            center_source = "dem_center"
-    else:
-        center_row, center_col, center_source = _resolve_acupoint_center(
-            dem, water, req.top_k, score_grid=qi_grid,
-        )
-
-    # —— 4) 四象：主来龙定坐、祖在龙源、父在近脊 ——
-    fb = detect_four_beasts(
+    aoi = analyze_aoi(
         dem,
+        water,
+        top_k=req.top_k,
+        min_score=0,
+        score_grid=score_grid,
         center_row=center_row,
         center_col=center_col,
-        water=water,
-        dragon_vein=dv,
-        primary_dragon=primary,
+        require_beasts=True,
     )
-    # 若主龙给出 facing 且与 face 冲突过大，仍以 detect 为准（已含背高面水）
-    fb_dict: dict[str, dict[str, float]] = {}
-    for k in ("shaozu", "xuanwu", "zhuque", "qinglong", "baihu"):
-        v = getattr(fb, k, None)
-        if v:
-            fb_dict[k] = {"x": float(v[0]), "y": float(v[1])}
-            bm = (fb.meta or {}).get("beasts", {}).get(k)
-            if isinstance(bm, dict):
-                for mk in ("elev_m", "dist_m", "bearing_deg", "row", "col", "on_ridge"):
-                    if mk in bm and bm[mk] is not None:
-                        fb_dict[k][mk] = bm[mk]
-    center_xy = {"x": float(fb.center[0]), "y": float(fb.center[1])} if fb.center else None
-    facing = float(fb.facing)
-
-    # 龙脉 GeoJSON：主龙优先画 rank1
-    ridges_geo = {"type": "FeatureCollection", "features": []}
-    try:
-        ridge_payload = []
-        if dv is not None and getattr(dv, "ridge_lines", None):
-            # 主龙置顶
-            order = list(range(len(dv.ridge_lines)))
-            if primary is not None and 0 <= primary.ridge_idx < len(order):
-                order = [primary.ridge_idx] + [
-                    i for i in order if i != primary.ridge_idx
-                ]
-            for rank, i in enumerate(order[:8], 1):
-                r = dv.ridge_lines[i]
-                # 栅格 (row,col) → 世界坐标 (x,y) 供前端 worldToImg
-                world_coords = []
-                for rr, cc in r.coords:
-                    try:
-                        x, y = dem.xy(int(rr), int(cc))
-                        world_coords.append([float(x), float(y)])
-                    except Exception:
-                        continue
-                if len(world_coords) < 2:
-                    continue
-                ridge_payload.append({
-                    "coords": world_coords,
-                    "rank": rank,
-                    "is_primary": bool(primary and i == primary.ridge_idx),
-                })
-        ridges_geo = ridges_geojson(ridge_payload)
-    except Exception:
-        ridges_geo = {"type": "FeatureCollection", "features": []}
-
-    cands = [
-        {
-            "id": r.candidate_id,
-            "rank": r.rank,
-            "x": r.x,
-            "y": r.y,
-            "overall_score": r.overall,
-            "form_type": r.form_type,
-            "scores": r.scores,
-            "geography": r.geography,
-            "meta": getattr(r, "meta", None) or {},
-        }
-        for r in results
-    ]
-    cands_geo = candidates_geojson(cands)
-
-    primary_meta = None
-    if primary is not None:
-        # 主脊 Strahler 角色（若分级成功）
-        ridge_role = None
-        ridge_order = None
-        try:
-            if dv is not None and 0 <= primary.ridge_idx < len(dv.ridge_lines):
-                rr = dv.ridge_lines[primary.ridge_idx]
-                ridge_role = getattr(rr, "role", None)
-                ridge_order = getattr(rr, "strahler_order", None)
-        except Exception:
-            pass
-        primary_meta = {
-            "method": primary.method,
-            "score": round(primary.score, 3),
-            "flow_azimuth_deg": round(primary.flow_azimuth_deg, 1),
-            "sit_deg": round(primary.sit_deg, 1),
-            "facing_deg": round(primary.facing_deg, 1),
-            "length_m": round(primary.length_m, 1),
-            "downhill_m": round(primary.downhill_m, 1),
-            "entrance": {
-                "row": primary.entrance_row,
-                "col": primary.entrance_col,
-                "x": primary.entrance_xy[0],
-                "y": primary.entrance_xy[1],
-            },
-            "ridge_idx": primary.ridge_idx,
-            "strahler_order": ridge_order,
-            "ridge_role": ridge_role,
-            "detail": primary.meta,
-        }
-
-    return _sanitize_floats({
-        "center": center_xy,
-        "center_source": center_source,
-        "center_row": int(center_row),
-        "center_col": int(center_col),
-        "facing": facing,
-        "sit": float(getattr(fb, "sit", (facing + 180) % 360)),
-        "facing_method": getattr(fb, "facing_method", ""),
-        "four_beasts": fb_dict,
-        "four_beasts_meta": getattr(fb, "meta", {}) or {},
-        "four_beasts_geojson": four_beasts_geojson(fb_dict),
-        "ridges_geojson": ridges_geo,
-        "candidates": cands,
-        "candidates_geojson": cands_geo,
-        "primary_dragon": primary_meta,
-        "pipeline": "dragon_first",
-        "qi_peak": (
-            {"row": int(qi_peak_rc[0]), "col": int(qi_peak_rc[1])}
-            if qi_peak_rc is not None else None
-        ),
-    })
+    return structured_from_aoi(aoi)
 
 
 # ============ 端点 ============
