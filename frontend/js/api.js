@@ -43,11 +43,14 @@ export async function fetchWater(lon, lat, radius_km) {
       ok: false,
       features: [],
       count: 0,
+      degraded: true,
       warning: String(err.detail || resp.statusText || "水系服务不可用"),
     };
   }
   const data = await resp.json();
-  return { ok: true, ...data };
+  // 后端 ok 字段优先；缺省时有要素即视为成功
+  const ok = data.ok !== undefined ? Boolean(data.ok) : (Number(data.count) > 0 || !data.degraded);
+  return { ok, ...data };
 }
 
 export async function saveTiffBytes(bytes) {

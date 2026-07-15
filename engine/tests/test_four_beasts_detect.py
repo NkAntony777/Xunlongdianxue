@@ -130,8 +130,45 @@ class TestDetectFourBeasts:
         xw = fb.meta["beasts"].get("xuanwu")
         if xw is None:
             pytest.skip("synthetic DEM has no xuanwu peak")
-        # 合成 DEM 范围有限，放宽到 3 km
+        # 合成 DEM 范围有限；相对 L 不贴身
         assert xw["dist_m"] < 3000
+        L = float((fb.meta.get("params_m") or {}).get("L_site_m") or 2000)
+        assert xw["dist_m"] >= 0.06 * L
+
+    def test_beast_distance_windows_scale_relative(self):
+        """比例制：L 越大窗越大；无绝对 180/800 硬地板。"""
+        from engine.core.four_beasts_detect import (
+            beast_distance_windows,
+            XUANWU_FRAC,
+            SHAOZU_XUANWU_DIST_RATIO,
+        )
+
+        small = beast_distance_windows(800.0, cell_m=30.0)
+        large = beast_distance_windows(4500.0, cell_m=30.0)
+        assert large["L"] > small["L"]
+        assert large["xuanwu"][0] > small["xuanwu"][0]
+        # 玄武下界 ≈ frac × L（允许噪声地板）
+        assert small["xuanwu"][0] <= small["L"] * (XUANWU_FRAC[0] + 0.05) + 50
+        assert large["shaozu"][0] >= large["xuanwu"][0] * (SHAOZU_XUANWU_DIST_RATIO - 0.05)
+        # 小局玄武下界应远小于「180m 绝对时代」对大局的限制感：
+        # 大局白虎下界应明显高于小局
+        assert large["baihu"][0] > small["baihu"][0] * 1.3
+
+    def test_hierarchy_shaozu_farther_and_baihu_not_hugging(self, synth_dem):
+        """少祖远于玄武；白虎相对局尺度不贴穴。"""
+        h, w = synth_dem.data.shape
+        fb = detect_four_beasts(synth_dem, h // 2, w // 2)
+        beasts = fb.meta.get("beasts") or {}
+        params = fb.meta.get("params_m") or {}
+        L = float(params.get("L_site_m") or 0) or 1.0
+        xw = beasts.get("xuanwu")
+        sz = beasts.get("shaozu")
+        bh = beasts.get("baihu")
+        if xw and sz:
+            assert sz["dist_m"] >= xw["dist_m"] * 1.5 - 1.0
+        if bh and L > 0:
+            # 白虎 ≥ 约 0.08L（比例下限放宽容差）
+            assert bh["dist_m"] >= min(0.08 * L, float((params.get("baihu") or [0])[0]) * 0.7)
 
 
 class TestInferFacing:
@@ -441,13 +478,13 @@ class TestScoreGridPerformanceG3:
         )
 
     def test_water_plateau_prefers_mid_range_over_bank(self):
-        """得水宽平台：300–600m 不低于贴岸 80m（避免岸边光环）。"""
+        """得水宽平台：300–600m 明显高于贴岸 80m（避免岸边光环）。"""
         from engine.core.four_beasts_detect import _water_distance_plateau
 
         d = np.array([80.0, 200.0, 400.0, 700.0, 1500.0, 3500.0])
         g = _water_distance_plateau(d)
-        assert g[2] >= g[0] - 1e-9  # 400m ≥ 80m
-        assert g[1] >= 0.85  # 200m 进入平台肩部高分
+        assert g[2] > g[0] + 0.15  # 400m 堂心 >> 80m 贴岸
+        assert g[1] >= 0.90  # 200m 进入/近平台高分
         assert g[5] < g[3]  # 过远 < 平台
 
     def test_auto_sample_step_caps_work(self, synth_dem):

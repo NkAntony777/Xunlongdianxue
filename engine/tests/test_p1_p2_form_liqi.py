@@ -119,8 +119,10 @@ class TestWaterBaselineDoc:
     def test_baseline_matches_math_doc(self):
         from engine.core.water_model import water_get_baseline
 
-        assert water_get_baseline(40.0) == pytest.approx(68.0)
-        assert water_get_baseline(300.0) == pytest.approx(86.0)
+        # 工程细化：贴岸弱、堂心中距强（仍在 §2.4 有情宽带内）
+        assert water_get_baseline(40.0) == pytest.approx(60.0)
+        assert water_get_baseline(300.0) == pytest.approx(94.0)
+        assert water_get_baseline(300.0) > water_get_baseline(80.0)
         assert water_get_baseline(2000.0) == pytest.approx(78.0)
         assert water_get_baseline(5000.0) < 78.0
 
@@ -225,3 +227,71 @@ class TestXueStar:
         bonus, notes = score_xue_star_bonus(star)
         assert -10 <= bonus <= 10
         assert isinstance(notes, str)
+
+
+class TestEntranceRefine:
+    def test_refine_prefers_drop_not_flat_tail(self):
+        """尾段平坦延伸时，入首应落在急降+转折处而非最末端。"""
+        from engine.core.dragon_vein import refine_entrance_on_ordered
+
+        h, w = 60, 20
+        data = np.zeros((h, w), dtype=float)
+        # 北高南低脊：row 5→40 急降，row 40→55 平坦尾
+        for r in range(h):
+            if r < 40:
+                data[r, 10] = 600.0 - r * 4.0
+            else:
+                data[r, 10] = 600.0 - 40 * 4.0  # flat
+        dem = make_dem_from_func(lambda yy, xx: data[yy, xx], h=h, w=w, cell_size_m=30.0)
+        # 有意覆盖
+        dem.data[:] = data
+        coords = np.array([[r, 10] for r in range(5, 56)], dtype=np.int32)
+        pt, meta = refine_entrance_on_ordered(dem, coords, assume_high_to_low=True)
+        assert pt is not None
+        assert meta.get("refined")
+        # 应在急降段附近（row ~35-45），不应钉在最末端 55
+        assert pt[0] < 54
+
+
+class TestMouthJiaoYa:
+    def test_single_side_sand_low_lock(self):
+        from shapely.geometry import LineString
+        import geopandas as gpd
+        from engine.io.rivers import WaterNetwork
+        from engine.core.water_mouth import WaterMouth, score_mouth_locking
+
+        line = LineString([(0, 0), (0, 1000)])
+        gdf = gpd.GeoDataFrame(geometry=[line], crs="EPSG:3857")
+        wn = WaterNetwork(gdf=gdf)
+        mouth = WaterMouth(
+            x=0, y=500, kind="endpoint", n_inflows=1,
+            lock_ratio=0.0, facing_angle_deg=0, is_jiaogou=False, role="dihu",
+        )
+
+        def sand_one_side(x, y, bearing):
+            # 仅左（bearing~270 或 90 一侧）有砂
+            b = float(bearing) % 360.0
+            if 200 < b < 340 or b < 20:
+                return 80.0
+            return 5000.0  # 另一侧无砂
+
+        lock = score_mouth_locking(wn, mouth, sand_one_side)
+        assert lock <= 0.3
+
+    def test_elev_fn_roles(self):
+        from shapely.geometry import LineString
+        import geopandas as gpd
+        from engine.io.rivers import WaterNetwork
+        from engine.core.water_mouth import find_water_mouths
+
+        line = LineString([(0, 0), (0, 2000)])
+        gdf = gpd.GeoDataFrame(geometry=[line], crs="EPSG:3857")
+        wn = WaterNetwork(gdf=gdf)
+
+        def elev_fn(x, y):
+            return float(y)  # 北高南低 → y 大 = 天门
+
+        mouths = find_water_mouths(wn, elev_fn=elev_fn)
+        by_role = {m.role: m for m in mouths if m.role in ("tianmen", "dihu")}
+        if "tianmen" in by_role and "dihu" in by_role:
+            assert by_role["tianmen"].y > by_role["dihu"].y

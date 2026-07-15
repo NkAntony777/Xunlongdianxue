@@ -43,9 +43,13 @@ class WaterChannels:
 def water_get_baseline(dist_m: float, *, banned: bool = False) -> float:
     """B_get(d)：得水距离基线（不含形态增益）。
 
-    真源：research/99_summary/03_数理模型 §2.4
-      0 < d ≤ 50     → 68
-      50 < d ≤ 1000  → 86
+    真源：research/99_summary/03_数理模型 §2.4 宽带 50–1000 有情。
+    工程细化：**近水而不贴水**——堂心/中距高于贴岸，避免河岸光环。
+      0 < d ≤ 50      → 60（界水近，得水弱）
+      50 < d ≤ 120    → 70–78（近岸过渡）
+      120 < d ≤ 220   → 84–92（入堂）
+      220 < d ≤ 700   → 94（堂心有情峰）
+      700 < d ≤ 1000  → 88
       1000 < d ≤ 3000 → 78
     更远段为工程外推；割脚近场由 P_水煞另惩。
     """
@@ -54,9 +58,21 @@ def water_get_baseline(dist_m: float, *, banned: bool = False) -> float:
     if dist_m <= 0:
         return 0.0
     if dist_m <= 50:
-        return 68.0
+        return 60.0
+    if dist_m <= 120:
+        # 50→120：70 → 78
+        t = (dist_m - 50.0) / 70.0
+        return float(70.0 + 8.0 * t)
+    if dist_m <= 220:
+        # 120→220：84 → 92
+        t = (dist_m - 120.0) / 100.0
+        return float(84.0 + 8.0 * t)
+    if dist_m <= 700:
+        return 94.0
     if dist_m <= 1000:
-        return 86.0
+        # 700→1000：94 → 88
+        t = (dist_m - 700.0) / 300.0
+        return float(94.0 - 6.0 * t)
     if dist_m <= 3000:
         return 78.0
     if dist_m <= 8000:
@@ -67,19 +83,24 @@ def water_get_baseline(dist_m: float, *, banned: bool = False) -> float:
 
 
 def water_sha_dist_penalty(dist_m: float, *, banned: bool = False) -> float:
-    """P_dist(d)：距离割脚/近场煞。"""
+    """P_dist(d)：距离割脚/近场煞。
+
+    贴岸（<150m）加重惩罚，逼候选离岸入堂；200m 外轻煞。
+    """
     if banned or not np.isfinite(dist_m) or dist_m < 0:
         return 100.0
     if dist_m <= 0:
         return 100.0
     if dist_m <= 40:
-        return 92.0
+        return 95.0
     if dist_m <= 80:
-        return 78.0
+        return 86.0
     if dist_m <= 120:
-        return 48.0
-    if dist_m <= 200:
-        return 18.0
+        return 62.0
+    if dist_m <= 160:
+        return 42.0
+    if dist_m <= 220:
+        return 22.0
     if dist_m <= 1100:
         return 6.0
     return 0.0

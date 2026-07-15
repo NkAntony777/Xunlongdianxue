@@ -602,7 +602,60 @@ def score_four_beasts_combined_at(
         )
         xw_score = float(clamp_score(0.7 * xw_height_score + 0.3 * xw_slope_score))
 
-    # 朱雀（热力快路径：坡度代理；完整路径另含 viewshed）
+    # —— 扇区起伏代理（对齐完整路径蜿蜒/viewshed，无需 DEM 对象）——
+    def _sector_relief_proxy(center_deg: float) -> tuple[float, float]:
+        """返回 (sinu_proxy 0-100, openness_proxy 0-100)。
+
+        sinu：径向最高点折线的弧/弦近似（蜿蜒）
+        openness：前向低起伏 + 缓坡 → 高分（viewshed 代理）
+        """
+        mask = finite & _sector_mask(bearing, center_deg, half_width_deg=45.0)
+        if not mask.any():
+            return 70.0, 70.0
+        # 按距离环取最高点
+        rings = 8
+        pts = []
+        for i in range(1, rings + 1):
+            r_lo = search_radius_m * (i - 1) / rings
+            r_hi = search_radius_m * i / rings
+            rm = mask & (dist_m > r_lo) & (dist_m <= r_hi)
+            if not rm.any():
+                continue
+            idx = np.argmax(np.where(rm, sub_e, -np.inf))
+            rr, cc = np.unravel_index(idx, sub_e.shape)
+            pts.append((float(dx_m[rr, cc]), float(dy_m[rr, cc]), float(sub_e[rr, cc])))
+        sinu_s = 70.0
+        if len(pts) >= 3:
+            arc = 0.0
+            for a, b in zip(pts[:-1], pts[1:]):
+                arc += float(np.hypot(b[0] - a[0], b[1] - a[1]))
+            chord = float(np.hypot(pts[-1][0] - pts[0][0], pts[-1][1] - pts[0][1]))
+            sinu = float(np.clip(arc / max(chord, 1e-3), 1.0, 3.0))
+            lo, hi = QL_SINU_SWEET
+            if sinu <= 1.02:
+                sinu_s = 35.0
+            elif sinu < lo:
+                sinu_s = 35.0 + 50.0 * (sinu - 1.02) / max(lo - 1.02, 1e-3)
+            elif sinu <= hi:
+                sinu_s = 90.0
+            else:
+                sinu_s = max(40.0, 90.0 - (sinu - hi) * 40.0)
+        # 开阔：扇区高差小 + 坡缓
+        hs = sub_e[mask]
+        ss = sub_s[mask]
+        relief = float(np.nanmax(hs) - np.nanmin(hs)) if hs.size else 40.0
+        ms = float(np.nanmean(ss)) if ss.size and np.isfinite(ss).any() else 15.0
+        open_s = float(clamp_score(
+            0.55 * (100.0 - linear_normalize(ms, 0, 25))
+            + 0.45 * (100.0 - linear_normalize(relief, 0, 80))
+        ))
+        return float(sinu_s), float(open_s)
+
+    ql_sinu, _ = _sector_relief_proxy(dirs[0])
+    _, zq_open = _sector_relief_proxy(dirs[2])
+    bh_sinu, _ = _sector_relief_proxy(dirs[1])  # 白虎也用起伏：尖峰高起伏扣驯俯
+
+    # 朱雀：坡度 + 起伏开阔代理（对齐 viewshed 权重 45%）
     if np.isnan(zq_s) and np.isnan(zq_h):
         zq_score = 30.0
     else:
@@ -613,17 +666,16 @@ def score_four_beasts_combined_at(
             (0.0 if np.isnan(zq_h) else zq_h) - cand, 0, 60, invert=True
         )
         zq_base = 0.7 * zq_slope_score + 0.3 * zq_height_penalty
-        # 快路径无 viewshed：以坡度开阔代理 0.85 中性补齐，逼近完整分
-        zq_score = float(clamp_score(0.55 * zq_base + 0.45 * 70.0))
+        zq_score = float(clamp_score(0.55 * zq_base + 0.45 * zq_open))
 
-    # 青龙（快路径：高度为主 + 中性蜿蜒 70）
+    # 青龙：高度 + 蜿蜒代理（对齐完整 60/40）
     if np.isnan(ql_h):
         ql_h_s = 50.0
     else:
         ql_h_s = float(linear_normalize(ql_h - cand, 0, 150))
-    ql_score = float(clamp_score(0.60 * ql_h_s + 0.40 * 70.0))
+    ql_score = float(clamp_score(0.60 * ql_h_s + 0.40 * ql_sinu))
 
-    # 白虎（与完整路径同 ratio 甜区 + 驯俯用顶坡近似）
+    # 白虎：ratio 甜区 + 驯俯（坡 + 尖峰起伏惩罚）
     if np.isnan(bh_h):
         bh_ratio_score = 50.0
     else:
@@ -644,7 +696,6 @@ def score_four_beasts_combined_at(
                 bh_ratio_score = float(
                     clamp_score(100 * (1.0 - 0.30 * ratio / BAIHU_QL_RATIO))
                 )
-    # 白虎扇区 mean slope 作驯俯代理
     _bh_s = _bh_s if not np.isnan(_bh_s) else 18.0
     if _bh_s <= 12.0:
         tame_s = 90.0
@@ -652,6 +703,9 @@ def score_four_beasts_combined_at(
         tame_s = 90.0 - (_bh_s - 12.0) / max(BH_TAME_SLOPE_MAX - 12.0, 1e-3) * 30.0
     else:
         tame_s = max(25.0, 60.0 - (_bh_s - BH_TAME_SLOPE_MAX) * 2.0)
+    # 尖削：蜿蜒代理过高且坡陡 → 再压
+    if _bh_s > 28.0 and bh_sinu > 80.0:
+        tame_s = min(tame_s, 45.0)
     bh_score = float(clamp_score(0.55 * bh_ratio_score + 0.45 * tame_s))
 
     return float(clamp_score(0.25 * ql_score + 0.25 * bh_score + 0.25 * xw_score + 0.25 * zq_score))

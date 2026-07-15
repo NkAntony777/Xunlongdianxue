@@ -875,16 +875,18 @@ def layer_all(
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"all layers failed: {e}")
 
-    return {
-        "bbox": list(dem.bounds),
+    # 必须整包 sanitize：legend / structured / peak 常含 numpy 标量，
+    # 否则 FastAPI jsonable_encoder 报 numpy.int32 not iterable → 图层渲染失败
+    return _sanitize_floats({
+        "bbox": [float(x) for x in dem.bounds],
         "dem": {
-            "width": dem.width,
-            "height": dem.height,
+            "width": int(dem.width),
+            "height": int(dem.height),
             "vmin": float(np.nanmin(dem.data)),
             "vmax": float(np.nanmax(dem.data)),
-            "resolution_m": res_m,
-            "width_m": width_m,
-            "height_m": height_m,
+            "resolution_m": float(res_m),
+            "width_m": float(width_m),
+            "height_m": float(height_m),
             "crs": str(dem.crs) if dem.crs else None,
         },
         "basemap": {
@@ -915,4 +917,4 @@ def layer_all(
             "legend": cs.legend,
         },
         "structured": structured,
-    }
+    })

@@ -12,7 +12,7 @@
 
 因此：
   - **过小**（半径 < 3 km）：朝山/少祖常落在图外，四象与主轴失真。
-  - **推荐** 5–15 km：能覆盖案朝山与近祖山，又保持 DEM 分辨率与耗时可控。
+  - **推荐** 3–8 km（默认 5 km）：覆盖案朝与近祖，分辨率与耗时较均衡。
   - **过大**（半径 > 25 km）：ESRI 单次导出像素变稀、Overpass 易超时，且格局被稀释。
 
 半径定义为：以分析中心为圆心的圆半径（km），拉取 DEM/水系的半宽。
@@ -27,11 +27,12 @@ MIN_RADIUS_KM = 3.0
 MAX_RADIUS_KM = 25.0
 
 # 推荐区间（前端提示，API 不拒绝）
-REC_MIN_RADIUS_KM = 5.0
-REC_MAX_RADIUS_KM = 15.0
+# 实践：3–5 km 对四象/明堂足够，又不过度稀释格局
+REC_MIN_RADIUS_KM = 3.0
+REC_MAX_RADIUS_KM = 8.0
 
-# 默认圈选
-DEFAULT_RADIUS_KM = 8.0
+# 默认圈选（适中；过小四象失真，过大 DEM 变稀）
+DEFAULT_RADIUS_KM = 5.0
 
 
 def validate_radius_km(radius_km: float) -> float:
@@ -84,7 +85,8 @@ def aoi_limits_payload() -> dict[str, Any]:
                 "山川格局统计不可靠。"
             ),
             "recommended": (
-                "5–15 km 可覆盖案山/朝山与近祖山，并保持约 30–100 m DEM 分辨率与可接受耗时。"
+                "3–8 km（默认 5 km）可覆盖案山/朝山与近祖，"
+                "并保持约 30–100 m DEM 分辨率与可接受耗时。"
             ),
             "max": (
                 "超过 25 km 时单次 ESRI 导出像元变稀、Overpass 易超时，"

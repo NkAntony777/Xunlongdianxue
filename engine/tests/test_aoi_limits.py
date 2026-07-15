@@ -29,8 +29,9 @@ class TestAoiLimitsCore:
             validate_radius_km(MAX_RADIUS_KM + 1)
 
     def test_quality(self):
-        assert radius_quality(8) == "ok"
-        assert radius_quality(3.5) == "small"
+        assert radius_quality(5) == "ok"
+        assert radius_quality(3.5) == "ok"  # 推荐 3–8 km
+        assert radius_quality(12) == "large"
         assert radius_quality(20) == "large"
         assert radius_quality(1) == "invalid"
 
@@ -51,9 +52,12 @@ class TestAoiAPI:
     def test_validate_endpoint(self, client):
         bad = client.post("/api/aoi/validate", json={"radius_km": 1})
         assert bad.json()["ok"] is False
-        good = client.post("/api/aoi/validate", json={"radius_km": 10})
+        good = client.post("/api/aoi/validate", json={"radius_km": 5})
         assert good.json()["ok"] is True
         assert good.json()["quality"] == "ok"
+        wide = client.post("/api/aoi/validate", json={"radius_km": 12})
+        assert wide.json()["ok"] is True
+        assert wide.json()["quality"] == "large"
 
     def test_elevation_rejects_small(self, client):
         r = client.post(

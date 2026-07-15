@@ -24,25 +24,157 @@ from scipy.ndimage import maximum_filter
 from engine.io.dem import DEM
 
 
-# —— 米制默认参数（来自调研文档 + 开源对照 research/02_four_beasts/01_*）——
-XUANWU_DIST_M = (50.0, 500.0)       # 父母山 / 靠山
-XUANWU_DH_SWEET_M = (30.0, 120.0)   # 相对穴高差甜区
-ZHUQUE_DIST_M = (200.0, 3000.0)     # 案山–朝山
-SIDE_DIST_M = (80.0, 1200.0)        # 龙虎砂（主搜不宜过远）
-BAIHU_DIST_M = (80.0, 800.0)        # 白虎更紧：驯俯近砂
-SHAOZU_DIST_M = (500.0, 8000.0)     # 少祖更远
-SECTOR_HALF_BACK = 40.0             # 玄武扇区半角
-SECTOR_HALF_FRONT = 45.0            # 朱雀扇区半角
-SECTOR_HALF_SIDE = 50.0             # 龙虎扇区半角
-SECTOR_HALF_SHAOZU = 55.0           # 少祖扇区半角
-PEAK_FOOTPRINT_PX = 3               # 局部峰值最小间距（像素）
-WATER_BAN_BUFFER_M = 60.0           # 水面+缓冲硬禁穴（候选/场评）
-# 四象砂点：只禁真水面 + 极窄噪声边。允许对岸近岸案/护砂（视线可跨水）。
-# 切勿与穴心 60 m 同宽——宽禁带会删掉参考图常见的跨河岸砂头。
+# —— 比例制距离（局尺度 L 归一，非绝对米硬限）——
+# L = 多信号特征长度（AOI / 来龙脊 / 前水）；窗 = frac × L，仅像元噪声地板。
+# 兼容旧名：下列 *_DIST_M 为 L≈2.2km 时的示意米值，运行时以 beast_distance_windows 为准。
+XUANWU_FRAC = (0.12, 0.38)         # 父母山 / 玄武：L 的 12%–38%
+SHAOZU_FRAC = (0.42, 1.65)         # 少祖：更远，可超 L
+SIDE_FRAC = (0.10, 0.55)           # 龙虎
+BAIHU_FRAC = (0.12, 0.48)          # 白虎（略紧于青龙上界）
+ZHUQUE_FRAC = (0.12, 1.25)         # 朱雀案朝
+# 层级：少祖 / 玄武 距离比（拓扑相对，与米无关）
+SHAOZU_XUANWU_DIST_RATIO = 2.0
+# 贴身否决：相对 L 的最小比例（非固定米）
+XUANWU_MIN_FRAC = 0.10
+BAIHU_MIN_FRAC = 0.10
+SHAOZU_MIN_FRAC = 0.35
+# 仅噪声地板：k × 像元（防 DEM 邻元假峰）
+NOISE_FLOOR_CELLS = 3.0
+# 玄武高差：下限固定小噪声带；上限随 L 缓变（在 windows 里可重算）
+XUANWU_DH_SWEET_M = (25.0, 150.0)
+# 旧常量别名（文档/测试兼容；真值运行时覆盖）
+XUANWU_DIST_M = (200.0, 700.0)
+ZHUQUE_DIST_M = (200.0, 3000.0)
+SIDE_DIST_M = (180.0, 1400.0)
+BAIHU_DIST_M = (200.0, 1000.0)
+SHAOZU_DIST_M = (1000.0, 8000.0)
+SECTOR_HALF_BACK = 38.0
+SECTOR_HALF_FRONT = 45.0
+SECTOR_HALF_SIDE = 45.0
+SECTOR_HALF_SHAOZU = 48.0
+PEAK_FOOTPRINT_PX = 3
+WATER_BAN_BUFFER_M = 60.0
 BEAST_WATER_BAN_M = 12.0
-CROSS_WATER_BONUS_ZHUQUE = 0.38     # 朱雀：穴→峰线段穿过水面时的软加分（案山隔水）
-CROSS_WATER_BONUS_SIDE = 0.15       # 龙虎：隔水护砂轻微加分（非强制）
-BAIHU_QL_ELEV_RATIO = 0.85          # 白虎/青龙高度比上限
+CROSS_WATER_BONUS_ZHUQUE = 0.38
+CROSS_WATER_BONUS_SIDE = 0.15
+CROSS_WATER_PENALTY_BACK = 3.5
+REJECT_CROSS_WATER_BACK = True
+BAIHU_QL_ELEV_RATIO = 0.85
+
+
+def noise_floor_m(cell_m: float) -> float:
+    """像元噪声地板：仅防邻元假峰，不充当地理尺度。"""
+    c = max(float(cell_m), 1.0)
+    return float(NOISE_FLOOR_CELLS * c)
+
+
+def estimate_site_scale_m(
+    aoi_half_diag_m: float,
+    *,
+    cell_m: float = 30.0,
+    ridge_length_m: float | None = None,
+    water_front_m: float | None = None,
+    elev_range_m: float | None = None,
+) -> dict[str, float]:
+    """估计局尺度 L（米），供比例窗使用。
+
+    信号（可缺省）：
+      - L_aoi：图幅半对角 ×0.85（分析区尺度）
+      - L_ridge：主来龙源→入首弧长（龙局尺度）
+      - L_water：穴→前水距离 ×2.2（明堂/界水尺度）
+      - L_relief：高差 ×25（山势粗尺度，弱权重）
+
+    合成：对有效信号取加权几何平均，避免单源极端。
+    """
+    nf = noise_floor_m(cell_m)
+    parts: list[tuple[float, float]] = []  # (value, weight)
+    L_aoi = max(nf * 20.0, float(aoi_half_diag_m) * 0.85)
+    parts.append((L_aoi, 1.0))
+    if ridge_length_m is not None and np.isfinite(ridge_length_m) and ridge_length_m > nf * 10:
+        parts.append((float(ridge_length_m), 1.25))
+    if water_front_m is not None and np.isfinite(water_front_m) and water_front_m > nf:
+        # 明堂特征长 ≈ 前水距的 2–2.5 倍
+        parts.append((float(water_front_m) * 2.2, 1.1))
+    if elev_range_m is not None and np.isfinite(elev_range_m) and elev_range_m > 5.0:
+        parts.append((float(elev_range_m) * 25.0, 0.35))
+
+    # 加权 log 平均
+    log_sum = 0.0
+    w_sum = 0.0
+    for v, w in parts:
+        v = max(v, nf * 15.0)
+        log_sum += w * float(np.log(v))
+        w_sum += w
+    L = float(np.exp(log_sum / max(w_sum, 1e-9)))
+    # 相对 AOI 软夹：不超出图幅可解释范围太多，也不小于噪声地板团
+    L = float(np.clip(L, nf * 25.0, max(L_aoi * 1.35, nf * 40.0)))
+    return {
+        "L": L,
+        "L_aoi": L_aoi,
+        "L_ridge": float(ridge_length_m) if ridge_length_m else 0.0,
+        "L_water": float(water_front_m) * 2.2 if water_front_m else 0.0,
+        "noise_floor_m": nf,
+        "cell_m": float(cell_m),
+    }
+
+
+def beast_distance_windows(
+    aoi_half_diag_m: float,
+    *,
+    cell_m: float = 30.0,
+    ridge_length_m: float | None = None,
+    water_front_m: float | None = None,
+    elev_range_m: float | None = None,
+    dist_cap_m: float | None = None,
+    L: float | None = None,
+) -> dict[str, Any]:
+    """比例制四象/祖山距离窗：d ∈ [f_lo, f_hi] × L，仅噪声地板。
+
+    不再用 180m/800m 一类绝对硬限（小谷与大河湾尺度差一个数量级）。
+    返回值含各窗 (lo, hi) 米（由 L 换算）及 scale 元数据。
+    """
+    scale = estimate_site_scale_m(
+        aoi_half_diag_m,
+        cell_m=cell_m,
+        ridge_length_m=ridge_length_m,
+        water_front_m=water_front_m,
+        elev_range_m=elev_range_m,
+    )
+    if L is not None and np.isfinite(L) and L > 0:
+        scale = dict(scale)
+        scale["L"] = float(L)
+    Ls = float(scale["L"])
+    nf = float(scale["noise_floor_m"])
+    cap = float(dist_cap_m) if dist_cap_m is not None else Ls * 1.8
+
+    def _win(f_lo: float, f_hi: float, *, min_frac_hard: float = 0.0) -> tuple[float, float]:
+        lo = max(nf * 2.0, f_lo * Ls, min_frac_hard * Ls)
+        hi = max(lo + nf * 4.0, min(f_hi * Ls, cap))
+        return (float(lo), float(hi))
+
+    xw = _win(XUANWU_FRAC[0], XUANWU_FRAC[1], min_frac_hard=XUANWU_MIN_FRAC)
+    sz = _win(SHAOZU_FRAC[0], SHAOZU_FRAC[1], min_frac_hard=SHAOZU_MIN_FRAC)
+    # 少祖下界至少为玄武下界 × 比例（相对约束）
+    sz = (max(sz[0], xw[0] * SHAOZU_XUANWU_DIST_RATIO), sz[1])
+    if sz[1] < sz[0] + nf:
+        sz = (sz[0], sz[0] + max(nf * 8.0, 0.15 * Ls))
+    bh = _win(BAIHU_FRAC[0], BAIHU_FRAC[1], min_frac_hard=BAIHU_MIN_FRAC)
+    side = _win(SIDE_FRAC[0], SIDE_FRAC[1], min_frac_hard=BAIHU_MIN_FRAC * 0.9)
+    zq = _win(ZHUQUE_FRAC[0], ZHUQUE_FRAC[1])
+    return {
+        "xuanwu": xw,
+        "shaozu": sz,
+        "baihu": bh,
+        "side": side,
+        "zhuque": zq,
+        "scale": scale,
+        "L": Ls,
+        "noise_floor_m": nf,
+        # 硬下限 = 窗下界（已是 frac×L），供调用方 hard_min
+        "xuanwu_min_hard_m": xw[0],
+        "baihu_min_hard_m": bh[0],
+        "shaozu_min_hard_m": sz[0],
+    }
 
 
 @dataclass
@@ -243,27 +375,119 @@ def _segment_hits_water(
     r1: int,
     c1: int,
     n_samples: int = 24,
+    *,
+    end_skip: float = 0.12,
 ) -> bool:
-    """穴心→砂峰线段是否穿过水面（不含端点邻域，避免贴岸误判）。
+    """两点连线是否穿过水面（不含端点邻域，避免贴岸误判）。
 
-    用于软加分「隔水案山/护砂」：点仍须在干地，仅判断视线/格局是否跨水。
+    用于：
+      - 软加分「隔水案山/护砂」（朱雀/龙虎）
+      - 硬拒「来龙/少祖/玄武隔水」（水界龙止）
+
+    采样数随像素距离自适应，避免窄河道被端点 skip 漏检。
     """
     if water_surface is None or not np.any(water_surface):
         return False
     h, w = water_surface.shape
     if not (0 <= r0 < h and 0 <= c0 < w and 0 <= r1 < h and 0 <= c1 < w):
         return False
-    # 跳过两端各 ~12% 采样，避免穴/峰本身近岸像元被当成「跨水」
-    n = max(8, int(n_samples))
-    for i in range(2, n - 1):
-        t = i / float(n - 1)
-        if t < 0.12 or t > 0.88:
+    pix_len = float(np.hypot(r1 - r0, c1 - c0))
+    # 至少每像素约 1.5 点，上限 128——OSM 河面常仅 1 像元宽
+    n = max(int(n_samples), int(np.ceil(pix_len * 1.5)) + 4, 16)
+    n = min(n, 128)
+    # 端点跳过：约 1–2 像元，避免贴岸假阳性；勿按长比例跳过（会漏窄河）
+    skip_px = max(1.0, min(2.0, pix_len * min(float(end_skip), 0.08)))
+    lo = skip_px / max(pix_len, 1.0)
+    hi = 1.0 - lo
+    if lo >= hi:
+        lo, hi = 0.08, 0.92
+    # 真水面栅格多为单像素河线：中段命中 ≥1 即视为跨水（水界龙止）
+    # 旧逻辑要求连续 2 点 → 嘉陵江级单像元河全部漏检
+    for i in range(n):
+        t = i / float(n - 1) if n > 1 else 0.5
+        if t < lo or t > hi:
             continue
         r = int(round(r0 + t * (r1 - r0)))
         c = int(round(c0 + t * (c1 - c0)))
         if 0 <= r < h and 0 <= c < w and bool(water_surface[r, c]):
             return True
     return False
+
+
+def _ridge_path_crosses_water(
+    water_surface: np.ndarray | None,
+    coords: np.ndarray | list,
+    *,
+    min_hits: int = 2,
+    sample_stride: int = 1,
+) -> bool:
+    """脊线折线是否多次踏入水面（龙脉过水 / 脉断）。"""
+    if water_surface is None or not np.any(water_surface):
+        return False
+    h, w = water_surface.shape
+    hits = 0
+    arr = np.asarray(coords)
+    if len(arr) < 2:
+        return False
+    step = max(1, int(sample_stride))
+    for i in range(0, len(arr) - 1, step):
+        r0, c0 = int(arr[i, 0]), int(arr[i, 1])
+        r1, c1 = int(arr[min(i + step, len(arr) - 1), 0]), int(
+            arr[min(i + step, len(arr) - 1), 1]
+        )
+        if _segment_hits_water(water_surface, r0, c0, r1, c1, n_samples=12, end_skip=0.05):
+            hits += 1
+            if hits >= min_hits:
+                return True
+    return False
+
+
+def same_bank_as_hole(
+    water_surface: np.ndarray | None,
+    hole_row: int,
+    hole_col: int,
+    target_row: int,
+    target_col: int,
+) -> bool:
+    """目标与穴是否同岸：优先陆地连通，其次直线不穿水面。
+
+    理论：界水则止 / 水界龙止——来龙祖宗须与穴同岸连续。
+    河曲半岛上「绕岸可达」比直线更合理（直线易误判跨水）。
+    """
+    if water_surface is None or not np.any(water_surface):
+        return True
+    # 1) 陆地 4-连通：同陆块 = 同岸（寻龙沿陆脊）
+    try:
+        from scipy.ndimage import label as nd_label
+        land = ~water_surface.astype(bool)
+        if (
+            0 <= hole_row < land.shape[0]
+            and 0 <= hole_col < land.shape[1]
+            and 0 <= target_row < land.shape[0]
+            and 0 <= target_col < land.shape[1]
+            and land[hole_row, hole_col]
+            and land[target_row, target_col]
+        ):
+            labeled, nlab = nd_label(land)
+            if nlab > 0 and int(labeled[hole_row, hole_col]) == int(
+                labeled[target_row, target_col]
+            ) and int(labeled[hole_row, hole_col]) > 0:
+                return True
+            # 不同陆块 → 异岸
+            if (
+                int(labeled[hole_row, hole_col]) > 0
+                and int(labeled[target_row, target_col]) > 0
+                and int(labeled[hole_row, hole_col])
+                != int(labeled[target_row, target_col])
+            ):
+                return False
+    except Exception:
+        pass
+    # 2) 回退：直线穿水
+    return not _segment_hits_water(
+        water_surface, hole_row, hole_col, target_row, target_col,
+        n_samples=32, end_skip=0.10,
+    )
 
 
 def _nearest_water_bearing(
@@ -549,7 +773,12 @@ def _select_peak_in_sector(
     forbid_mask: np.ndarray | None = None,
     water_surface_mask: np.ndarray | None = None,
     cross_water_bonus: float = 0.0,
+    cross_water_penalty: float = 0.0,
+    reject_cross_water: bool = False,
     viewshed_bonus: float = 0.0,
+    out_rejected_cross: list | None = None,
+    hard_min_dist_m: float | None = None,
+    soft_min_frac: float = 0.35,
 ) -> BeastPoint | None:
     """在方位扇区 + 距离环内，从局部峰值中选综合最优者。
 
@@ -557,10 +786,12 @@ def _select_peak_in_sector(
       - 避开图幅边缘 border_margin 像素（防止 (0,0) 角点假峰）
       - 距离不超过 max_dist_cap_m（通常为 AOI 半对角）
       - forbid_mask（真水面等）上的峰跳过——不禁止对岸干峰
+      - reject_cross_water：穴→峰穿水面则跳过（来龙/少祖/玄武同岸）
       - elev_mode: higher | lower | sweet（sweet 用 dh_sweet 高差窗）
 
     软偏好：
       - cross_water_bonus>0 且线段穿过 water_surface_mask 时加分（隔水案/护砂）
+      - cross_water_penalty>0 且跨水时减分（未硬拒时）
       - viewshed_bonus>0：穴→峰视线开阔加分（朝案有情）
     """
     h, w = dem.data.shape
@@ -580,6 +811,11 @@ def _select_peak_in_sector(
     if max_dist_cap_m is not None:
         d_hi = min(d_hi, max_dist_cap_m)
     d_search_hi = min(d_hi * 1.35, max_dist_cap_m if max_dist_cap_m else d_hi * 1.35)
+    # 硬下限：少祖等场景禁止用 soft_min_frac 偷近
+    d_min_hard = float(hard_min_dist_m) if hard_min_dist_m is not None else max(
+        10.0, float(d_lo) * float(soft_min_frac)
+    )
+    d_min_hard = max(10.0, d_min_hard)
 
     interior = (
         (yy >= margin) & (yy < h - margin)
@@ -594,32 +830,35 @@ def _select_peak_in_sector(
         & interior
         & dry
         & np.isfinite(dem.data)
-        & (dist_m >= max(10.0, d_lo * 0.35))
+        & (dist_m >= d_min_hard)
         & (dist_m <= d_search_hi)
         & (ang <= sector_half)
     )
     if not region.any():
-        # 回退：扇区内任意高点（仍禁止贴边/真水面）
+        # 回退：扇区内任意高点（仍禁止贴边/真水面/硬下限）
         region = (
             interior
             & dry
             & np.isfinite(dem.data)
-            & (dist_m >= max(10.0, d_lo * 0.35))
+            & (dist_m >= d_min_hard)
             & (dist_m <= d_search_hi)
             & (ang <= sector_half)
         )
         if not region.any():
             return None
 
-    use_cross = (
-        cross_water_bonus > 0
-        and water_surface_mask is not None
+    has_ws = (
+        water_surface_mask is not None
         and water_surface_mask.shape == (h, w)
         and bool(np.any(water_surface_mask))
     )
+    use_cross_bonus = cross_water_bonus > 0 and has_ws
+    use_cross_pen = (cross_water_penalty > 0 or reject_cross_water) and has_ws
 
     best: BeastPoint | None = None
     best_s = -1e18
+    best_cross: BeastPoint | None = None  # 跨水最优峰 → 可改标朝砂
+    best_cross_s = -1e18
     rs, cs = np.where(region)
     for r, c in zip(rs.tolist(), cs.tolist()):
         skip = False
@@ -676,11 +915,29 @@ def _select_peak_in_sector(
                 # 白虎抬头：重罚
                 s -= 0.9 * (elev - prefer_lower_than) / 40.0
 
-        # 隔水砂：视线可跨水，峰点须已在 dry 区
-        if use_cross and _segment_hits_water(
-            water_surface_mask, center_row, center_col, r, c
-        ):
+        crosses = False
+        if has_ws and (use_cross_bonus or use_cross_pen):
+            crosses = _segment_hits_water(
+                water_surface_mask, center_row, center_col, r, c
+            )
+
+        # 隔水案/护砂：加分
+        if use_cross_bonus and crosses:
             s += float(cross_water_bonus)
+
+        # 来龙/少祖/玄武：跨水硬拒或重罚（水界龙止）
+        if use_cross_pen and crosses:
+            x, y = dem.xy(r, c)
+            cand_bp = BeastPoint(
+                x=float(x), y=float(y), row=int(r), col=int(c),
+                elev_m=elev, dist_m=d, bearing_deg=brg, score=float(s),
+            )
+            if s > best_cross_s:
+                best_cross_s = s
+                best_cross = cand_bp
+            if reject_cross_water:
+                continue
+            s -= float(cross_water_penalty)
 
         # 朝案视线（Viewshed 简化）
         if viewshed_bonus > 0:
@@ -700,6 +957,8 @@ def _select_peak_in_sector(
                 x=float(x), y=float(y), row=int(r), col=int(c),
                 elev_m=elev, dist_m=d, bearing_deg=brg, score=float(s),
             )
+    if out_rejected_cross is not None and best_cross is not None:
+        out_rejected_cross.append(best_cross)
     return best
 
 
@@ -819,11 +1078,90 @@ def detect_four_beasts(
     occupied: list[tuple[int, int]] = [(center_row, center_col)]
     cand_elev = float(dem.data[center_row, center_col])
 
-    # AOI 半对角：少祖等不得超出图幅可解释范围
+    # 局尺度 L + 比例距离窗（非绝对米硬限）
     mpx, mpy = _m_per_px(dem)
+    cell_m = float(max(0.5 * (mpx + mpy), 1.0))
     half_diag_m = 0.5 * float(np.hypot(w * mpx, h * mpy))
-    # 略小于半对角，避免贴边
-    dist_cap = max(800.0, half_diag_m * 0.92)
+    dist_cap = max(noise_floor_m(cell_m) * 30.0, half_diag_m * 0.95)
+
+    # 来龙脊长、前水距 → 参与 L
+    ridge_len_m: float | None = None
+    if primary_dragon is not None:
+        try:
+            ordered = getattr(primary_dragon, "ordered_coords", None)
+            if ordered is not None and len(ordered) >= 2:
+                # 弧长近似
+                tot = 0.0
+                for i in range(1, len(ordered)):
+                    r0, c0 = int(ordered[i - 1][0]), int(ordered[i - 1][1])
+                    r1, c1 = int(ordered[i][0]), int(ordered[i][1])
+                    tot += float(np.hypot((r1 - r0) * mpy, (c1 - c0) * mpx))
+                if tot > cell_m * 5:
+                    ridge_len_m = tot
+            if ridge_len_m is None:
+                lp = getattr(primary_dragon, "length_m", None) or getattr(
+                    primary_dragon, "length_proxy_m", None
+                )
+                if lp is not None and float(lp) > cell_m * 5:
+                    ridge_len_m = float(lp)
+        except Exception:
+            ridge_len_m = None
+
+    water_front_m: float | None = None
+    if water is not None and not getattr(water, "empty", True):
+        try:
+            cx, cy = dem.xy(center_row, center_col)
+            d_w = float(water.distance_to_nearest_m(cx, cy))
+            if np.isfinite(d_w) and d_w < half_diag_m * 2:
+                water_front_m = d_w
+        except Exception:
+            water_front_m = None
+
+    elev_rng = None
+    try:
+        finite_e = dem.data[np.isfinite(dem.data)]
+        if finite_e.size > 20:
+            elev_rng = float(np.nanpercentile(finite_e, 95) - np.nanpercentile(finite_e, 5))
+    except Exception:
+        elev_rng = None
+
+    _wins = beast_distance_windows(
+        half_diag_m,
+        cell_m=cell_m,
+        ridge_length_m=ridge_len_m,
+        water_front_m=water_front_m,
+        elev_range_m=elev_rng,
+        dist_cap_m=dist_cap,
+    )
+    L_site = float(_wins["L"])
+    XW_DIST = (
+        float(_wins["xuanwu"][0]),
+        min(float(_wins["xuanwu"][1]), dist_cap),
+    )
+    SZ_DIST = (
+        float(_wins["shaozu"][0]),
+        min(float(_wins["shaozu"][1]), dist_cap),
+    )
+    BH_DIST = (
+        float(_wins["baihu"][0]),
+        min(float(_wins["baihu"][1]), dist_cap),
+    )
+    SIDE_DIST = (
+        float(_wins["side"][0]),
+        min(float(_wins["side"][1]), dist_cap),
+    )
+    ZQ_DIST = (
+        float(_wins["zhuque"][0]),
+        min(float(_wins["zhuque"][1]), dist_cap),
+    )
+    XW_MIN_HARD = float(_wins["xuanwu_min_hard_m"])
+    BH_MIN_HARD = float(_wins["baihu_min_hard_m"])
+    SZ_MIN_HARD = float(_wins["shaozu_min_hard_m"])
+    # 高差甜区上限随 L 缓变（小局收、大局放）
+    XW_DH_SWEET = (
+        15.0,
+        float(np.clip(0.06 * L_site, 40.0, 220.0)),
+    )
 
     # 水体禁选（四象）：仅禁真水面 + 极窄噪声边。
     # 穴心仍用 WATER_BAN_BUFFER_M(60m)；砂点允许对岸近岸案/护砂，视线可跨水。
@@ -836,6 +1174,21 @@ def detect_four_beasts(
     if water_surface is None or not np.any(water_surface):
         # 无栅格水面时用极窄 dist 近似表面
         water_surface = np.isfinite(_wd0) & (_wd0 < max(1.0, min(mpx, mpy) * 0.6))
+    # 来龙/少祖同岸判定：水面膨胀 1–2 像元（OSM 线河仅 1px 宽，直线易漏）
+    water_surface_dragon = water_surface
+    try:
+        from scipy.ndimage import binary_dilation
+        if water_surface is not None and np.any(water_surface):
+            # ~1 像元 ≈ 30m COP30；再加 dist 阈值兜底
+            water_surface_dragon = binary_dilation(
+                water_surface.astype(bool), iterations=2,
+            )
+            if np.isfinite(_wd0).any():
+                water_surface_dragon = water_surface_dragon | (
+                    np.isfinite(_wd0) & (_wd0 < max(35.0, min(mpx, mpy) * 1.2))
+                )
+    except Exception:
+        water_surface_dragon = water_surface
     # 双保险：距水 < 极窄缓冲仍禁（防栅格化漏河心）
     if np.isfinite(_wd).any():
         water_ban = water_ban | (np.isfinite(_wd) & (_wd < _beast_ban_m))
@@ -845,15 +1198,24 @@ def detect_four_beasts(
         border_margin=margin,
         max_dist_cap_m=dist_cap,
         forbid_mask=water_ban,
+        # 朱雀隔水加分仍用细水面；来龙同岸用膨胀水面（见 sel_back）
         water_surface_mask=water_surface,
     )
-    # 玄武/少祖：靠山宜同岸，不加跨水激励
-    sel_back = dict(sel_kw, cross_water_bonus=0.0)
+    # 玄武/少祖：靠山须同岸（水界龙止硬拒跨水）；朱雀/龙虎可隔水加分
+    rejected_cross_peaks: list[BeastPoint] = []
+    sel_back = dict(
+        sel_kw,
+        water_surface_mask=water_surface_dragon,  # 膨胀水面，防单像元河漏检
+        cross_water_bonus=0.0,
+        cross_water_penalty=float(CROSS_WATER_PENALTY_BACK),
+        reject_cross_water=bool(REJECT_CROSS_WATER_BACK),
+        out_rejected_cross=rejected_cross_peaks,
+    )
     sel_zq = dict(sel_kw, cross_water_bonus=float(CROSS_WATER_BONUS_ZHUQUE))
     sel_side = dict(sel_kw, cross_water_bonus=float(CROSS_WATER_BONUS_SIDE))
 
     def _reject_water_bp(bp: BeastPoint | None) -> BeastPoint | None:
-        """几何兜底：真水面或贴图缘则丢弃；允许对岸近岸干峰。"""
+        """几何兜底：真水面或贴图缘则丢弃。"""
         if bp is None:
             return None
         if bp.row < margin or bp.row >= h - margin or bp.col < margin or bp.col >= w - margin:
@@ -865,6 +1227,29 @@ def detect_four_beasts(
                 return None
         except Exception:
             pass
+        return bp
+
+    def _reject_cross_water_bp(
+        bp: BeastPoint | None,
+        *,
+        role: str = "back",
+    ) -> BeastPoint | None:
+        """水界龙止：穴→峰穿主水面则否决（来龙/少祖/玄武）。
+
+        被否决的对岸峰记入 rejected_cross_peaks，可供朝砂展示。
+        """
+        if bp is None:
+            return None
+        if not REJECT_CROSS_WATER_BACK:
+            return bp
+        if water_surface_dragon is None or not np.any(water_surface_dragon):
+            return bp
+        if _segment_hits_water(
+            water_surface_dragon, center_row, center_col, bp.row, bp.col,
+            n_samples=48, end_skip=0.08,
+        ):
+            rejected_cross_peaks.append(bp)
+            return None
         return bp
 
     def _too_close(a: BeastPoint | None, b: BeastPoint | None, min_m: float = 80.0) -> bool:
@@ -897,9 +1282,10 @@ def detect_four_beasts(
                 vein = beasts_from_primary_dragon(
                     dem, center_row, center_col, primary_dragon,
                     forbid_mask=water_ban,
-                    xuanwu_dist=XUANWU_DIST_M,
-                    shaozu_dist=(SHAOZU_DIST_M[0], min(SHAOZU_DIST_M[1], dist_cap)),
+                    xuanwu_dist=XW_DIST,
+                    shaozu_dist=SZ_DIST,
                     water=water,
+                    water_surface=water_surface_dragon,
                 )
                 # 用主龙精修坐向/朝向（祖峰方向 = 坐）
                 pm = vein.meta or {}
@@ -921,10 +1307,11 @@ def detect_four_beasts(
                     dem, center_row, center_col, sit, facing_deg=facing_val,
                     peaks_mask=peaks,
                     forbid_mask=water_ban,
+                    water_surface=water_surface_dragon,
                     ridge_lines=ridge_lines,
                     ridge_mask=ridge_mask_dv,
-                    xuanwu_dist=XUANWU_DIST_M,
-                    shaozu_dist=(SHAOZU_DIST_M[0], min(SHAOZU_DIST_M[1], dist_cap)),
+                    xuanwu_dist=XW_DIST,
+                    shaozu_dist=SZ_DIST,
                     sector_half=max(SECTOR_HALF_BACK, SECTOR_HALF_SHAOZU),
                 )
 
@@ -944,16 +1331,37 @@ def detect_four_beasts(
                 "detail": vein.meta,
                 "theory": "坐靠来龙；少祖龙源；不绑绝对方位",
             }
-            xw = _reject_water_bp(_ridge_point_to_beast(dem, vein.xuanwu))
-            sz = _reject_water_bp(_ridge_point_to_beast(dem, vein.shaozu))
+            xw = _reject_cross_water_bp(
+                _reject_water_bp(_ridge_point_to_beast(dem, vein.xuanwu)),
+                role="xuanwu",
+            )
+            sz = _reject_cross_water_bp(
+                _reject_water_bp(_ridge_point_to_beast(dem, vein.shaozu)),
+                role="shaozu",
+            )
             if xw is not None:
                 xw_on_ridge = True
             if sz is not None:
                 sz_on_ridge = True
-            if xw is not None and sz is not None and sz.dist_m < xw.dist_m * 0.95:
-                sz = None
-                sz_on_ridge = False
-                vein_meta["shaozu_dropped"] = "not_farther_than_xuanwu"
+            else:
+                vein_meta.setdefault("shaozu_dropped", None)
+                if vein.shaozu is not None and sz is None:
+                    vein_meta["shaozu_dropped"] = "cross_water_same_bank"
+            if xw is None and vein.xuanwu is not None:
+                vein_meta["xuanwu_dropped"] = "cross_water_same_bank"
+            # 脊上结果仍须过比例硬窗：贴身玄武/伪祖丢弃（相对 L，非绝对米）
+            if xw is not None and xw.dist_m < XW_MIN_HARD * 0.90:
+                vein_meta["xuanwu_dropped"] = "too_close_hard"
+                xw = None
+                xw_on_ridge = False
+            if xw is not None and sz is not None:
+                if (
+                    sz.dist_m < SZ_MIN_HARD * 0.85
+                    or sz.dist_m < xw.dist_m * SHAOZU_XUANWU_DIST_RATIO
+                ):
+                    sz = None
+                    sz_on_ridge = False
+                    vein_meta["shaozu_dropped"] = "not_farther_than_xuanwu"
             # 祖定坐：有少祖则坐向对齐少祖
             if sz is not None and method.startswith("dragon"):
                 sit = float(sz.bearing_deg) % 360.0
@@ -966,43 +1374,49 @@ def detect_four_beasts(
             vein_meta = {"used": False, "method": "error", "error": str(exc)}
             xw, sz = None, None
 
-    # 玄武扇区回退
+    # 玄武扇区回退：硬 min = 比例窗下界（×L），优先窗中段
     if xw is None:
         xw = _select_peak_in_sector(
             dem, center_row, center_col, back_dir, SECTOR_HALF_BACK,
-            XUANWU_DIST_M, peaks, occupied=occupied,
+            XW_DIST, peaks, occupied=occupied,
             min_elev_above_cand=12.0,
             max_elev_above_cand=200.0,
             elev_mode="sweet",
-            dh_sweet=XUANWU_DH_SWEET_M,
-            weight_elev=1.3, weight_dist=1.4, **sel_back,
+            dh_sweet=XW_DH_SWEET,
+            weight_elev=1.2, weight_dist=1.6,
+            hard_min_dist_m=XW_MIN_HARD * 0.92,
+            soft_min_frac=0.90,
+            **sel_back,
         )
         if xw is None:
             xw = _select_peak_in_sector(
-                dem, center_row, center_col, back_dir, SECTOR_HALF_BACK + 15,
-                (40.0, min(900.0, dist_cap)), peaks, occupied=occupied,
-                min_elev_above_cand=5.0,
+                dem, center_row, center_col, back_dir, SECTOR_HALF_BACK + 12,
+                (XW_MIN_HARD * 0.85, min(XW_DIST[1] * 1.25, dist_cap)),
+                peaks, occupied=occupied,
+                min_elev_above_cand=8.0,
                 elev_mode="sweet",
-                dh_sweet=(15.0, 160.0),
-                weight_elev=1.0, weight_dist=1.1, **sel_back,
+                dh_sweet=XW_DH_SWEET,
+                weight_elev=1.1, weight_dist=1.4,
+                hard_min_dist_m=XW_MIN_HARD * 0.85,
+                soft_min_frac=0.90,
+                **sel_back,
             )
         if xw is None:
+            # 最后一档：仍守比例下限的 75%，禁止邻元贴穴
+            _lo_fb = max(XW_MIN_HARD * 0.75, noise_floor_m(cell_m) * 5)
             xw = _select_peak_in_sector(
-                dem, center_row, center_col, back_dir, SECTOR_HALF_BACK + 25,
-                (30.0, min(1500.0, dist_cap)), peaks, occupied=occupied,
-                min_elev_above_cand=2.0,
+                dem, center_row, center_col, back_dir, SECTOR_HALF_BACK + 22,
+                (_lo_fb, min(XW_DIST[1] * 1.5, dist_cap)), peaks, occupied=occupied,
+                min_elev_above_cand=5.0,
                 elev_mode="higher",
-                weight_elev=0.9, weight_dist=0.9, **sel_back,
+                weight_elev=1.0, weight_dist=1.2,
+                hard_min_dist_m=_lo_fb,
+                soft_min_frac=0.95,
+                **sel_back,
             )
-        if xw is None:
-            xw = _select_peak_in_sector(
-                dem, center_row, center_col, back_dir, 70.0,
-                (25.0, min(2000.0, dist_cap)), peaks, occupied=occupied,
-                min_elev_above_cand=None,
-                elev_mode="higher",
-                weight_elev=1.0, weight_dist=0.7, **sel_back,
-            )
-        xw = _reject_water_bp(xw)
+        xw = _reject_cross_water_bp(_reject_water_bp(xw), role="xuanwu")
+        if xw is not None and xw.dist_m < XW_MIN_HARD * 0.75:
+            xw = None
         xw_on_ridge = False
 
     if xw:
@@ -1010,38 +1424,197 @@ def detect_four_beasts(
 
     xw_elev = xw.elev_m if xw else cand_elev + 30.0
 
-    # 少祖扇区回退（脊上未取到时）
-    sz_hi = min(SHAOZU_DIST_M[1], dist_cap)
-    sz_lo = min(SHAOZU_DIST_M[0], sz_hi * 0.4)
+    # 少祖：远于玄武（比例）、宜更高、贴坐向；禁止贴穴伪祖
+    xw_dist = float(xw.dist_m) if xw is not None else max(XW_DIST[0], XW_MIN_HARD)
+    sz_hi = float(SZ_DIST[1])
+    sz_lo = min(
+        sz_hi * 0.95,
+        max(float(SZ_DIST[0]), xw_dist * SHAOZU_XUANWU_DIST_RATIO, SZ_MIN_HARD),
+    )
+    sz_half = min(SECTOR_HALF_SHAOZU, 42.0)
+    if sz is not None and xw is not None:
+        if (
+            sz.dist_m < xw.dist_m * SHAOZU_XUANWU_DIST_RATIO
+            or sz.dist_m < SZ_MIN_HARD * 0.80
+        ):
+            vein_meta["shaozu_dropped"] = "too_close_to_xuanwu_or_hole"
+            sz = None
+            sz_on_ridge = False
+    # 若少祖方位偏离坐向过大（被扫到侧砂），丢弃重选
+    if sz is not None and _angle_diff(sz.bearing_deg, back_dir) > 48.0:
+        vein_meta["shaozu_dropped"] = "off_sit_axis"
+        sz = None
+        sz_on_ridge = False
+    # 少祖宜高于玄武
+    if sz is not None and xw is not None and sz.elev_m < xw.elev_m - 15.0:
+        vein_meta["shaozu_dropped"] = "lower_than_xuanwu"
+        sz = None
+        sz_on_ridge = False
     if sz is None:
         sz = _select_peak_in_sector(
-            dem, center_row, center_col, back_dir, SECTOR_HALF_SHAOZU,
+            dem, center_row, center_col, back_dir, sz_half,
             (sz_lo, sz_hi), peaks, occupied=occupied,
             prefer_higher_than=xw_elev,
-            min_elev_above_cand=10.0,
-            weight_elev=1.3, weight_dist=0.7, **sel_back,
+            min_elev_above_cand=12.0,
+            weight_elev=1.45, weight_dist=0.70,
+            hard_min_dist_m=sz_lo,
+            soft_min_frac=0.95,
+            **sel_back,
         )
         if sz is None:
             sz = _select_peak_in_sector(
-                dem, center_row, center_col, back_dir, 70.0,
-                (max(300.0, sz_lo * 0.5), sz_hi),
+                dem, center_row, center_col, back_dir, min(58.0, sz_half + 14.0),
+                (sz_lo * 0.92, sz_hi),
                 peaks, occupied=occupied,
-                weight_elev=1.0, weight_dist=0.5, **sel_back,
+                prefer_higher_than=xw_elev,
+                min_elev_above_cand=8.0,
+                weight_elev=1.3, weight_dist=0.55,
+                hard_min_dist_m=max(sz_lo * 0.90, SZ_MIN_HARD * 0.85),
+                soft_min_frac=0.95,
+                **sel_back,
             )
-        sz = _reject_water_bp(sz)
+        if sz is None:
+            # 同岸后半球：宁远、宁高（龙源代理）
+            try:
+                best_far = None
+                best_sc = -1e18
+                min_d = max(sz_lo * 0.88, SZ_MIN_HARD * 0.85)
+                rs_p, cs_p = np.where(peaks)
+                for rr, cc in zip(rs_p.tolist(), cs_p.tolist()):
+                    dist = float(np.hypot((rr - center_row) * mpy, (cc - center_col) * mpx))
+                    if dist < min_d or dist > sz_hi:
+                        continue
+                    if not same_bank_as_hole(
+                        water_surface_dragon, center_row, center_col, rr, cc,
+                    ):
+                        continue
+                    brg = float(
+                        (np.degrees(np.arctan2(
+                            (cc - center_col) * mpx,
+                            (center_row - rr) * mpy,
+                        )) + 360.0) % 360.0
+                    )
+                    if _angle_diff(brg, back_dir) > 50.0:
+                        continue
+                    elev = float(dem.data[rr, cc])
+                    if elev < max(cand_elev + 8.0, xw_elev - 5.0):
+                        continue
+                    sc = dist / 450.0 + (elev - cand_elev) / 60.0 + max(0.0, elev - xw_elev) / 40.0
+                    if sc > best_sc:
+                        best_sc = sc
+                        bx, by = dem.xy(rr, cc)
+                        best_far = BeastPoint(
+                            x=float(bx), y=float(by), row=int(rr), col=int(cc),
+                            elev_m=elev, dist_m=dist, bearing_deg=brg, score=float(sc),
+                        )
+                if best_far is not None:
+                    sz = best_far
+                    vein_meta["shaozu_from"] = "farthest_same_bank_back_hemisphere"
+            except Exception:
+                pass
+        sz = _reject_cross_water_bp(_reject_water_bp(sz), role="shaozu")
+        if sz is not None and xw is not None and sz.dist_m < xw.dist_m * SHAOZU_XUANWU_DIST_RATIO:
+            rejected_cross_peaks.append(sz)
+            sz = None
+            vein_meta["shaozu_dropped"] = "sector_still_too_close"
         sz_on_ridge = False
-    # 若脊上少祖与玄武过近/被占用，再扇区补一次
+    # 若与玄武栅格重合，丢弃少祖（宁缺勿贴）
     if sz is not None and xw is not None:
         if abs(sz.row - xw.row) <= PEAK_FOOTPRINT_PX and abs(sz.col - xw.col) <= PEAK_FOOTPRINT_PX:
-            sz = _select_peak_in_sector(
-                dem, center_row, center_col, back_dir, SECTOR_HALF_SHAOZU,
-                (sz_lo, sz_hi), peaks, occupied=occupied,
-                prefer_higher_than=xw_elev,
-                min_elev_above_cand=10.0,
-                weight_elev=1.3, weight_dist=0.7, **sel_back,
-            )
-            sz = _reject_water_bp(sz)
+            sz = None
             sz_on_ridge = False
+            vein_meta["shaozu_dropped"] = "coincident_xuanwu"
+        elif _too_close(sz, xw, min_m=max(0.12 * L_site, xw.dist_m * 0.55)):
+            sz = None
+            sz_on_ridge = False
+            vein_meta["shaozu_dropped"] = "too_close_xuanwu"
+    # 主龙脊上再抢「上游少祖」：源端半段 + 更远 + 更高
+    need_ridge_sz = (
+        sz is None
+        or (xw is not None and sz.dist_m < xw.dist_m * SHAOZU_XUANWU_DIST_RATIO)
+        or (sz is not None and xw is not None and sz.elev_m < xw.elev_m - 10.0)
+    )
+    if need_ridge_sz and primary_dragon is not None:
+        try:
+            ordered = getattr(primary_dragon, "ordered_coords", None)
+            if ordered is not None and len(ordered) >= 5:
+                best_i = None
+                best_sc = -1e18
+                min_d = max(
+                    SZ_MIN_HARD * 0.9,
+                    (xw.dist_m * SHAOZU_XUANWU_DIST_RATIO) if xw else SZ_DIST[0],
+                )
+                n_ord = len(ordered)
+                # 优先源端 55%（来龙源头）
+                for i, rc in enumerate(ordered):
+                    rr, cc = int(rc[0]), int(rc[1])
+                    if not (0 <= rr < h and 0 <= cc < w):
+                        continue
+                    src_frac = i / max(n_ord - 1, 1)
+                    if src_frac > 0.60:
+                        continue  # 近入首段不作少祖
+                    if water_ban is not None and water_ban.shape == (h, w) and water_ban[rr, cc]:
+                        continue
+                    if not same_bank_as_hole(
+                        water_surface_dragon, center_row, center_col, rr, cc,
+                    ):
+                        continue
+                    dist = float(np.hypot((rr - center_row) * mpy, (cc - center_col) * mpx))
+                    if dist < min_d or dist > sz_hi:
+                        continue
+                    elev = float(dem.data[rr, cc])
+                    if not np.isfinite(elev) or elev < cand_elev + 5.0:
+                        continue
+                    if xw is not None and elev < xw.elev_m - 8.0:
+                        continue
+                    src_w = 1.0 - src_frac
+                    sc = dist / 600.0 + elev / 90.0 + 2.8 * src_w
+                    if xw is not None:
+                        sc += max(0.0, elev - xw.elev_m) / 40.0
+                    if sc > best_sc:
+                        best_sc = sc
+                        best_i = (rr, cc, dist, elev)
+                # 源端无则放开整脊，仍守距离
+                if best_i is None:
+                    for i, rc in enumerate(ordered):
+                        rr, cc = int(rc[0]), int(rc[1])
+                        if not (0 <= rr < h and 0 <= cc < w):
+                            continue
+                        if water_ban is not None and water_ban.shape == (h, w) and water_ban[rr, cc]:
+                            continue
+                        if not same_bank_as_hole(
+                            water_surface_dragon, center_row, center_col, rr, cc,
+                        ):
+                            continue
+                        dist = float(np.hypot((rr - center_row) * mpy, (cc - center_col) * mpx))
+                        if dist < min_d or dist > sz_hi:
+                            continue
+                        elev = float(dem.data[rr, cc])
+                        if not np.isfinite(elev) or elev < cand_elev + 5.0:
+                            continue
+                        src_w = 1.0 - i / max(n_ord - 1, 1)
+                        sc = dist / 700.0 + elev / 100.0 + 1.5 * src_w
+                        if sc > best_sc:
+                            best_sc = sc
+                            best_i = (rr, cc, dist, elev)
+                if best_i is not None:
+                    rr, cc, dist, elev = best_i
+                    bx, by = dem.xy(rr, cc)
+                    brg = float(
+                        (np.degrees(np.arctan2(
+                            (cc - center_col) * mpx,
+                            (center_row - rr) * mpy,
+                        )) + 360.0) % 360.0
+                    )
+                    sz = BeastPoint(
+                        x=float(bx), y=float(by), row=rr, col=cc,
+                        elev_m=elev, dist_m=dist, bearing_deg=brg, score=float(best_sc),
+                    )
+                    sz_on_ridge = True
+                    vein_meta["shaozu_from"] = "primary_ridge_upstream_same_bank"
+        except Exception as _e:
+            vein_meta["shaozu_upstream_err"] = str(_e)
+
     if sz:
         occupied.append((sz.row, sz.col))
 
@@ -1049,7 +1622,7 @@ def detect_four_beasts(
     sel_zq_vs = dict(sel_zq, viewshed_bonus=0.45)
     zq = _select_peak_in_sector(
         dem, center_row, center_col, front_dir, SECTOR_HALF_FRONT,
-        (ZHUQUE_DIST_M[0], min(ZHUQUE_DIST_M[1], dist_cap)),
+        ZQ_DIST,
         peaks, occupied=occupied,
         prefer_lower_than=xw_elev * 0.95 + cand_elev * 0.05,
         elev_mode="lower",
@@ -1058,7 +1631,8 @@ def detect_four_beasts(
     if zq is None:
         zq = _select_peak_in_sector(
             dem, center_row, center_col, front_dir, SECTOR_HALF_FRONT + 10,
-            (100.0, min(4000.0, dist_cap)), peaks, occupied=occupied,
+            (max(ZQ_DIST[0] * 0.7, noise_floor_m(cell_m) * 5), min(ZQ_DIST[1] * 1.3, dist_cap)),
+            peaks, occupied=occupied,
             elev_mode="higher",
             weight_elev=0.2, weight_dist=1.0, **sel_zq_vs,
         )
@@ -1066,24 +1640,58 @@ def detect_four_beasts(
     if zq:
         occupied.append((zq.row, zq.col))
 
-    # 4. 青龙（左）——可高耸有情；允许隔水护砂
-    side_hi = min(SIDE_DIST_M[1], dist_cap)
+    def _on_spine_axis(bp: BeastPoint | None, *, min_off_deg: float = 42.0) -> bool:
+        """是否落在坐-向主轴上（与祖/玄/雀共线）——龙虎不得占主轴。"""
+        if bp is None:
+            return False
+        if _angle_diff(bp.bearing_deg, back_dir) < min_off_deg:
+            return True
+        if _angle_diff(bp.bearing_deg, front_dir) < min_off_deg:
+            return True
+        if sz is not None and _angle_diff(bp.bearing_deg, sz.bearing_deg) < min_off_deg:
+            return True
+        if xw is not None and _angle_diff(bp.bearing_deg, xw.bearing_deg) < min_off_deg:
+            return True
+        return False
+
+    # 4. 青龙（左）——须在左扇区，禁止与祖/玄共线；忌贴穴
+    side_lo, side_hi = float(SIDE_DIST[0]), float(SIDE_DIST[1])
+    ql_half = min(SECTOR_HALF_SIDE, 40.0)
     ql = _select_peak_in_sector(
-        dem, center_row, center_col, left_dir, SECTOR_HALF_SIDE,
-        (SIDE_DIST_M[0], side_hi), peaks, occupied=occupied,
+        dem, center_row, center_col, left_dir, ql_half,
+        (side_lo, side_hi), peaks, occupied=occupied,
         min_elev_above_cand=0.0,
         elev_mode="higher",
-        weight_elev=1.0, weight_dist=1.0, **sel_side,
+        weight_elev=1.0, weight_dist=1.0,
+        hard_min_dist_m=max(side_lo * 0.85, noise_floor_m(cell_m) * 5),
+        soft_min_frac=0.90,
+        **sel_side,
     )
     ql = _reject_water_bp(ql)
+    if ql is not None and _on_spine_axis(ql):
+        occupied.append((ql.row, ql.col))
+        ql2 = _select_peak_in_sector(
+            dem, center_row, center_col, left_dir, ql_half + 8.0,
+            (side_lo, side_hi), peaks, occupied=occupied,
+            min_elev_above_cand=0.0,
+            elev_mode="higher",
+            weight_elev=1.0, weight_dist=1.0,
+            hard_min_dist_m=max(side_lo * 0.85, noise_floor_m(cell_m) * 5),
+            soft_min_frac=0.90,
+            **sel_side,
+        )
+        ql2 = _reject_water_bp(ql2)
+        ql = ql2 if (ql2 is not None and not _on_spine_axis(ql2)) else None
+        if ql is None:
+            vein_meta["qinglong_dropped"] = "collinear_with_shaozu_xuanwu"
     if ql:
         occupied.append((ql.row, ql.col))
 
-    # 5. 白虎（右）——驯俯：硬上限 ≤ 0.85×青龙；可隔水，不落水面
-    bh_hi = min(BAIHU_DIST_M[1], dist_cap)
+    # 5. 白虎（右）——驯俯；硬下限防贴穴；不得与祖玄共线
+    bh_lo, bh_hi = float(BH_DIST[0]), float(BH_DIST[1])
+    bh_min_hard = max(BH_MIN_HARD, bh_lo * 0.90)
     if ql is not None:
         ql_rel = max(0.0, ql.elev_m - cand_elev)
-        # 相对穴高差不超过青龙的 0.85；同时绝对高程不高于青龙
         max_bh_elev = min(
             ql.elev_m * 0.999,
             cand_elev + BAIHU_QL_ELEV_RATIO * max(ql_rel, 5.0),
@@ -1093,42 +1701,74 @@ def detect_four_beasts(
         max_bh_elev = cand_elev + 40.0
         prefer_lt = max_bh_elev
 
+    bh_half = min(SECTOR_HALF_SIDE, 40.0)
     bh = _select_peak_in_sector(
-        dem, center_row, center_col, right_dir, SECTOR_HALF_SIDE,
-        (BAIHU_DIST_M[0], bh_hi), peaks, occupied=occupied,
+        dem, center_row, center_col, right_dir, bh_half,
+        (bh_lo, bh_hi), peaks, occupied=occupied,
         prefer_lower_than=prefer_lt,
         max_elev_abs=max_bh_elev,
         elev_mode="lower",
-        weight_elev=1.1, weight_dist=1.2, **sel_side,
+        weight_elev=1.1, weight_dist=1.35,
+        hard_min_dist_m=bh_min_hard,
+        soft_min_frac=0.92,
+        **sel_side,
     )
     if bh is None:
-        # 回退：略放宽距离，仍守青龙高度比
         bh = _select_peak_in_sector(
-            dem, center_row, center_col, right_dir, SECTOR_HALF_SIDE + 10,
-            (SIDE_DIST_M[0], min(side_hi, 1500.0)), peaks, occupied=occupied,
+            dem, center_row, center_col, right_dir, bh_half + 10,
+            (bh_min_hard, min(side_hi, dist_cap)), peaks, occupied=occupied,
             prefer_lower_than=prefer_lt,
             max_elev_abs=max_bh_elev if ql is not None else None,
             elev_mode="higher",
-            weight_elev=0.9, weight_dist=1.0, **sel_side,
+            weight_elev=0.9, weight_dist=1.15,
+            hard_min_dist_m=bh_min_hard * 0.95,
+            soft_min_frac=0.92,
+            **sel_side,
         )
     bh = _reject_water_bp(bh)
-    # 白虎不得与玄武/少祖重合或贴在一起（图缘复用假峰）
-    if bh is not None and (_too_close(bh, xw, 120.0) or _too_close(bh, sz, 120.0)):
-        # 扩大占用后再选
+    if bh is not None and bh.dist_m < BH_MIN_HARD * 0.85:
+        bh = None
+        vein_meta["baihu_dropped"] = "too_close_hard"
+    if bh is not None and _on_spine_axis(bh):
+        occupied.append((bh.row, bh.col))
+        bh2 = _select_peak_in_sector(
+            dem, center_row, center_col, right_dir, bh_half + 12,
+            (bh_min_hard, min(side_hi, dist_cap)), peaks, occupied=occupied,
+            prefer_lower_than=prefer_lt,
+            max_elev_abs=max_bh_elev if ql is not None else None,
+            elev_mode="higher",
+            weight_elev=0.9, weight_dist=1.1,
+            hard_min_dist_m=bh_min_hard * 0.95,
+            soft_min_frac=0.92,
+            **sel_side,
+        )
+        bh2 = _reject_water_bp(bh2)
+        bh = bh2 if (bh2 is not None and not _on_spine_axis(bh2)) else None
+    # 白虎不得与玄武/少祖重合：分离阈值 = 0.08L（比例）
+    _sep_bh = max(noise_floor_m(cell_m) * 4, 0.08 * L_site)
+    if bh is not None and (_too_close(bh, xw, _sep_bh) or _too_close(bh, sz, _sep_bh)):
         if xw:
             occupied.append((xw.row, xw.col))
         if sz:
             occupied.append((sz.row, sz.col))
         bh2 = _select_peak_in_sector(
-            dem, center_row, center_col, right_dir, SECTOR_HALF_SIDE + 15,
-            (SIDE_DIST_M[0], min(side_hi, 1500.0)), peaks, occupied=occupied,
+            dem, center_row, center_col, right_dir, SECTOR_HALF_SIDE + 12,
+            (bh_min_hard, min(side_hi, dist_cap)), peaks, occupied=occupied,
             prefer_lower_than=prefer_lt,
             max_elev_abs=max_bh_elev if ql is not None else None,
             elev_mode="higher",
-            weight_elev=0.9, weight_dist=1.0, **sel_side,
+            weight_elev=0.9, weight_dist=1.1,
+            hard_min_dist_m=bh_min_hard,
+            soft_min_frac=0.92,
+            **sel_side,
         )
         bh2 = _reject_water_bp(bh2)
-        if bh2 is not None and not _too_close(bh2, xw, 100.0) and not _too_close(bh2, sz, 100.0):
+        if (
+            bh2 is not None
+            and not _too_close(bh2, xw, _sep_bh * 0.9)
+            and not _too_close(bh2, sz, _sep_bh * 0.9)
+            and bh2.dist_m >= BH_MIN_HARD * 0.85
+        ):
             bh = bh2
         else:
             bh = None
@@ -1181,6 +1821,20 @@ def detect_four_beasts(
     if incoming_az is not None:
         sit_align = round(_angle_diff(float(incoming_az), facing_val), 1)
 
+    # 对岸被拒高峰 → 朝砂候选（隔水可朝不可祖）
+    chaoshan_bp = None
+    if rejected_cross_peaks:
+        # 取距穴较远、较高者
+        chaoshan_bp = max(
+            rejected_cross_peaks,
+            key=lambda p: (p.elev_m, p.dist_m),
+        )
+        # 若已是朱雀则不重复
+        if zq is not None and abs(chaoshan_bp.row - zq.row) <= 2 and abs(
+            chaoshan_bp.col - zq.col
+        ) <= 2:
+            chaoshan_bp = None
+
     meta = {
         "cand_elev_m": round(cand_elev, 2),
         "facing_deg": round(facing_val, 2),
@@ -1192,6 +1846,10 @@ def detect_four_beasts(
             round(float(incoming_az), 1) if incoming_az is not None else None
         ),
         "incoming_face_align_deg": sit_align,
+        "same_bank_rule": "水界龙止：少祖/玄武须与穴同岸；对岸峰改标朝砂",
+        "reject_cross_water_back": bool(REJECT_CROSS_WATER_BACK),
+        "chaoshan_across_water": _bp_meta(chaoshan_bp),
+        "cross_water_rejected_n": len(rejected_cross_peaks),
         "beasts": {
             "shaozu": _bp_meta(sz, on_ridge=sz_on_ridge if sz else None),
             "xuanwu": _bp_meta(xw, on_ridge=xw_on_ridge if xw else None),
@@ -1200,13 +1858,31 @@ def detect_four_beasts(
             "baihu": _bp_meta(bh),
         },
         "params_m": {
-            "xuanwu": XUANWU_DIST_M,
-            "zhuque": ZHUQUE_DIST_M,
-            "side": SIDE_DIST_M,
-            "shaozu": SHAOZU_DIST_M,
+            "mode": "relative_scale",
+            "L_site_m": round(L_site, 1),
+            "scale": _wins.get("scale"),
+            "xuanwu": XW_DIST,
+            "zhuque": ZQ_DIST,
+            "side": SIDE_DIST,
+            "baihu": BH_DIST,
+            "shaozu": SZ_DIST,
+            "frac": {
+                "xuanwu": XUANWU_FRAC,
+                "shaozu": SHAOZU_FRAC,
+                "baihu": BAIHU_FRAC,
+                "side": SIDE_FRAC,
+                "zhuque": ZHUQUE_FRAC,
+            },
+            "shaozu_xw_ratio": float(SHAOZU_XUANWU_DIST_RATIO),
+            "xuanwu_min_hard_m": float(XW_MIN_HARD),
+            "baihu_min_hard_m": float(BH_MIN_HARD),
+            "shaozu_min_hard_m": float(SZ_MIN_HARD),
             "beast_water_ban_m": _beast_ban_m,
             "cross_water_bonus_zhuque": float(CROSS_WATER_BONUS_ZHUQUE),
             "cross_water_bonus_side": float(CROSS_WATER_BONUS_SIDE),
+            "cross_water_penalty_back": float(CROSS_WATER_PENALTY_BACK),
+            "aoi_half_diag_m": round(half_diag_m, 1),
+            "cell_m": round(cell_m, 2),
         },
     }
 
@@ -1244,16 +1920,16 @@ def _sigmoid(x: np.ndarray | float) -> np.ndarray | float:
 def _water_distance_plateau(
     dist_m: np.ndarray,
     *,
-    d_lo: float = 120.0,
+    d_lo: float = 180.0,
     d_hi: float = 900.0,
     d_far: float = 2800.0,
-    near_floor: float = 0.42,
+    near_floor: float = 0.22,
     far_floor: float = 0.28,
 ) -> np.ndarray:
-    """得水宽平台：明堂腹地高分，避免 300m 尖峰贴岸光环。
+    """得水宽平台：明堂腹地高分，避免贴岸光环。
 
-    - [d_lo, d_hi] → 1.0（有情界水甜区）
-    - < d_lo：从 near_floor 抬升到 1（贴岸不奖满）
+    - [d_lo, d_hi] → 1.0（有情界水甜区，默认自 ~180m 起）
+    - < d_lo：从 near_floor 抬升到 1（贴岸明显低于堂心）
     - > d_hi：缓降到 far_floor
     """
     d = np.asarray(dist_m, dtype=np.float64)
@@ -1284,23 +1960,25 @@ def compute_qi_field_layers(
     enclosure_radius_m: float = 500.0,
     water_opt_m: float = 300.0,
     water_sigma_m: float = 400.0,
-    water_lo_m: float = 120.0,
+    water_lo_m: float = 180.0,
     water_hi_m: float = 900.0,
     water_far_m: float = 2800.0,
     slope_opt_deg: float = 5.0,
     slope_sigma_deg: float = 14.0,
-    floor_cangfeng: float = 0.32,
-    floor_water: float = 0.22,
-    floor_enclosure: float = 0.55,
-    floor_stability: float = 0.32,
+    floor_cangfeng: float = 0.30,
+    floor_water: float = 0.18,
+    floor_enclosure: float = 0.52,
+    floor_stability: float = 0.30,
+    mingtang_boost: float = 0.42,
 ) -> dict[str, np.ndarray]:
     """全矢量生气子场（0–1），方向无关。
 
-    设计目标（对标河湾明堂，避免「贴水高、平地低」）::
-      - 藏风：中尺度略凹 + **细尺度平台**（大凹中小平）
-      - 得水：**宽平台** [water_lo, water_hi]，非 300m 尖峰
-      - 围合：15–100m 高差甜区，**开阔平地有底分**（不强制 60m）
-      - 稳定：0–12° 宜穴，**不惩罚近平**
+    设计目标（对标河湾平坦明堂 / 参考图橙心）::
+      - 藏风：中尺度略凹 + **细尺度平台**（大凹中小平）——平台权重大
+      - 得水：**宽平台** [water_lo, water_hi]，非 300m 尖峰；贴岸肩低
+      - 围合：**开阔平坦优先**（低起伏 + 缓坡），弱化「高墙夹峙」
+      - 稳定：0–8° 宜穴，近平给高分
+      - 明堂通道：平坦×开阔×有情水距 再乘性抬升（mingtang_boost）
       - 乘性 + 各通道地板，避免单项否决整场
 
     water_opt_m / water_sigma_m 保留兼容；优先使用 lo/hi/far 平台参数。
@@ -1349,20 +2027,22 @@ def compute_qi_field_layers(
     win = 2 * r_px + 1
     win_small = max(3, 2 * max(1, r_px // 3) + 1)
 
-    # 1) 藏风：中尺度略凹 + 细尺度平台（明堂）；平台权重更高
+    # 1) 藏风：中尺度略凹 + 细尺度平台（明堂）；平台权重再提高
     g_basin = _sigmoid(-0.35 * tpi_mid)
-    g_platform = np.exp(-(tpi_fine ** 2) / (2.0 * 0.65 ** 2))
-    g_cf = 0.32 * g_basin + 0.68 * g_platform
+    g_platform = np.exp(-(tpi_fine ** 2) / (2.0 * 0.55 ** 2))  # 更贴 |TPI|≈0
+    g_cf = 0.25 * g_basin + 0.75 * g_platform
     g_cf = np.clip(np.maximum(g_cf, floor_cangfeng), 0.0, 1.0)
 
-    # 2) 稳定：0–8° 宜穴；陡坡明显衰减（压山脚碎斑）
+    # 2) 稳定：0–6° 宜穴；近平给高分；陡坡明显衰减
     slope_safe = np.where(np.isfinite(slope_arr), slope_arr, 45.0)
     g_stab = np.exp(
         -((slope_safe - slope_opt_deg) / max(slope_sigma_deg, 1e-6)) ** 2
     )
-    g_stab = np.where(slope_safe <= 4.0, np.maximum(g_stab, 0.94), g_stab)
-    # 陡岸/坡麓（>18°）强压
-    g_stab = np.where(slope_safe > 18.0, g_stab * 0.45, g_stab)
+    g_stab = np.where(slope_safe <= 3.0, np.maximum(g_stab, 0.97), g_stab)
+    g_stab = np.where(slope_safe <= 6.0, np.maximum(g_stab, 0.90), g_stab)
+    # 陡岸/坡麓（>16°）强压——参考图热力不在山坡
+    g_stab = np.where(slope_safe > 16.0, g_stab * 0.38, g_stab)
+    g_stab = np.where(slope_safe > 22.0, g_stab * 0.55, g_stab)
     g_stab = np.clip(np.maximum(g_stab, floor_stability), 0.0, 1.0)
 
     # 3) 得水：宽平台 + 弯内/陆心（距水局部极大 → 半岛心）
@@ -1372,48 +2052,80 @@ def compute_qi_field_layers(
         d = np.where(np.isfinite(water_dist), water_dist, 1.0e6)
         g_water = _water_distance_plateau(
             d, d_lo=water_lo_m, d_hi=water_hi_m, d_far=water_far_m,
+            near_floor=0.20,
         )
+        # 贴岸额外肩衰减：禁带外 70–210m 仍压光环，逼热力入堂心
+        bank_fade = np.clip((d - 70.0) / 140.0, 0.0, 1.0)
+        g_water = g_water * (0.32 + 0.68 * bank_fade)
         # 弯内：距水大于邻域均值 → 离岸、居陆心（河环内侧台地）
         d_land = np.where(water_ban, 0.0, np.clip(d, 0.0, water_hi_m * 1.2))
         d_nb = uniform_filter(d_land, size=win_small, mode="nearest")
-        inland_excess = np.clip((d_land - d_nb) / 40.0, 0.0, 1.0)
-        # 仅在有情距离带内抬弯内
-        in_band = (d_land >= water_lo_m * 0.7) & (d_land <= water_hi_m * 1.15)
-        g_inland = np.where(in_band, 0.55 + 0.45 * inland_excess, 0.50)
-        g_water = g_water * (0.62 + 0.38 * g_inland)
+        inland_excess = np.clip((d_land - d_nb) / 30.0, 0.0, 1.0)
+        # 仅在有情距离带内抬弯内 / 堂心
+        in_band = (d_land >= water_lo_m * 0.70) & (d_land <= water_hi_m * 1.2)
+        g_inland = np.where(in_band, 0.38 + 0.62 * inland_excess, 0.36)
+        g_water = g_water * (0.48 + 0.52 * g_inland)
         g_water = np.where(water_ban, 0.0, np.clip(g_water, 0.0, 1.0))
         g_water = np.where(water_ban, 0.0, np.maximum(g_water, floor_water))
         g_water = np.where(water_ban, 0.0, g_water)
     else:
         g_water = np.full_like(elev, 0.72, dtype=np.float64)
         water_ban = np.zeros_like(elev, dtype=bool)
+        d = np.full_like(elev, 500.0)
+        in_band = np.ones_like(elev, dtype=bool)
 
-    # 4) 围合：单侧靠山（低于邻域均值）+ 开阔底分，弱化 max 高差奖山脚
+    # 4) 围合：开阔平坦优先（参考图明堂），靠山为辅、弱化高差奖山脚
     fill_val = float(np.nanmedian(elev[finite]))
     elev_f = np.where(finite, elev, fill_val)
     surrounding_max = maximum_filter(elev_f, size=win, mode="nearest")
     surrounding_mean = uniform_filter(elev_f, size=win, mode="nearest")
     relief_max = np.maximum(surrounding_max - elev_f, 0.0)
-    # 靠山：穴低于邻域平均（背后有高），sigmoid 缓变
+    # 局部起伏（小窗 std 代理）：明堂腹地应低
+    elev_sq = elev_f * elev_f
+    local_mean = uniform_filter(elev_f, size=win_small, mode="nearest")
+    local_var = np.maximum(
+        uniform_filter(elev_sq, size=win_small, mode="nearest") - local_mean ** 2,
+        0.0,
+    )
+    local_std = np.sqrt(local_var)
+    g_flat_local = np.exp(-(local_std ** 2) / (2.0 * 6.0 ** 2))  # σ≈6m 内高分
+    g_flat_local = np.maximum(g_flat_local, 0.35)
+
+    # 靠山：穴低于邻域平均（背后有高），权重降低——避免热力爬坡
     below_mean = surrounding_mean - elev_f
-    g_back = _sigmoid(0.06 * below_mean)  # 低一点有靠
-    # 开阔：不要求高墙；低 max 高差给高开阔分
-    g_open = np.exp(-(np.maximum(relief_max - 25.0, 0.0) ** 2) / (2.0 * 70.0 ** 2))
-    g_open = np.maximum(g_open, 0.62)
-    # 逼压：邻域相对过高
-    g_open = np.where(relief_max > 160.0, g_open * 0.55, g_open)
-    # 合成：靠山 + 开阔；再用缓坡权重压陡麓
-    g_enc = 0.45 * g_back + 0.55 * g_open
-    g_enc = g_enc * (0.75 + 0.25 * np.exp(-(slope_safe / 16.0) ** 2))
+    g_back = _sigmoid(0.05 * below_mean)
+    # 开阔：低 max 高差 + 低局地起伏
+    g_open_relief = np.exp(-(np.maximum(relief_max - 18.0, 0.0) ** 2) / (2.0 * 55.0 ** 2))
+    g_open_relief = np.maximum(g_open_relief, 0.58)
+    g_open_relief = np.where(relief_max > 140.0, g_open_relief * 0.50, g_open_relief)
+    g_open = 0.55 * g_open_relief + 0.45 * g_flat_local
+    # 合成：开阔平坦为主，靠山为辅；缓坡再抬
+    g_enc = 0.32 * g_back + 0.68 * g_open
+    g_enc = g_enc * (0.70 + 0.30 * np.exp(-(slope_safe / 12.0) ** 2))
     g_enc = np.clip(np.maximum(g_enc, floor_enclosure), 0.0, 1.0)
 
-    # 乘性融合
+    # 5) 明堂通道：平坦平台 × 开阔 × 缓坡 × 有情水距
+    g_mt_flat = g_platform * g_flat_local
+    g_mt_open = g_open * np.exp(-(slope_safe / 10.0) ** 2)
+    if has_water:
+        g_mt_water = np.where(in_band, g_water, g_water * 0.75)
+    else:
+        g_mt_water = g_water
+    g_mingtang = np.clip(
+        g_mt_flat * (0.40 + 0.60 * g_mt_open) * (0.50 + 0.50 * g_mt_water),
+        0.0, 1.0,
+    )
+    g_mingtang = np.where(water_ban, 0.0, g_mingtang)
+
+    # 乘性融合 + 明堂乘性抬升（参考图：橙心在平坦明堂腹地，非贴岸）
     qi = g_cf * g_water * g_enc * g_stab
+    boost = float(np.clip(mingtang_boost, 0.0, 0.60))
+    qi = qi * (1.0 - boost + boost * (0.28 + 0.72 * g_mingtang))
     qi = np.where(finite & ~water_ban, qi, 0.0)
-    # 轻平滑：凝聚单团明堂心（非遮瑕级大模糊）
+    # 平滑：略加大，凝聚单团明堂心（对标参考图大团橙心）
     from scipy.ndimage import gaussian_filter
 
-    qi_s = gaussian_filter(qi, sigma=max(0.8, min(r_px, 8) * 0.35))
+    qi_s = gaussian_filter(qi, sigma=max(1.0, min(r_px, 10) * 0.50))
     # 保持禁水与无效
     qi = np.where(finite & ~water_ban, qi_s, 0.0)
     # 归一到 [0,1] 保持动态范围
@@ -1427,6 +2139,7 @@ def compute_qi_field_layers(
         "water": g_water.astype(np.float64),
         "enclosure": g_enc.astype(np.float64),
         "stability": g_stab.astype(np.float64),
+        "mingtang": g_mingtang.astype(np.float64),
         "qi": qi.astype(np.float64),
         "water_ban": water_ban,
         "finite": finite,

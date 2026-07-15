@@ -183,10 +183,14 @@ class TestClassicalDragonSit:
         assert vein.method == "primary_dragon_classical"
         # 坐向应大致指向龙源（相对穴）
         if vein.shaozu is not None:
-            assert vein.shaozu.dist_m > 100
-            # 少祖应比玄武更远（若两者都有）
+            # 少祖应明显远于玄武（比例/拓扑，非绝对米）
             if vein.xuanwu is not None:
-                assert vein.shaozu.dist_m >= vein.xuanwu.dist_m * 0.9
+                assert vein.shaozu.dist_m >= vein.xuanwu.dist_m * 1.5
+            else:
+                assert vein.shaozu.dist_m > 50
+        if vein.xuanwu is not None:
+            # 玄武不得邻元贴穴（相对合成 DEM 像元）
+            assert vein.xuanwu.dist_m >= 40.0
 
         fb = detect_four_beasts(
             dem, cr, cc, water=None,

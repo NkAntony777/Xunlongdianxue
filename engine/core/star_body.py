@@ -470,4 +470,3 @@ def score_xue_star_bonus(star: StarBodyResult) -> tuple[int, str]:
     if star.type in ("火星", "廉贞"):
         return int(round(-8 * star.confidence)), f"穴星{star.type}无情"
     return 0, "穴星未明"
-    return base_score * 0.85

@@ -192,21 +192,70 @@ def _elements_to_gdf(data: dict) -> gpd.GeoDataFrame:
     return gpd.GeoDataFrame(rows, crs="EPSG:4326")
 
 
-# ============== 内存缓存 ==============
+# ============== 内存 + 磁盘缓存 ==============
 
 _MEM_CACHE: dict[str, Tuple[float, gpd.GeoDataFrame]] = {}
 _MEM_CACHE_MAX = 16
+_DISK_CACHE_TTL_S = 6 * 3600  # 6h：Overpass 抖动时复用近期成功结果
+
+
+def _disk_cache_path(key: str):
+    """项目 temp 下的水系磁盘缓存路径。"""
+    from pathlib import Path
+    import hashlib
+    import tempfile
+
+    h = hashlib.sha1(key.encode("utf-8")).hexdigest()[:20]
+    base = Path(tempfile.gettempdir()) / "xunlong_water_cache"
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    return base / f"{h}.geojson"
+
+
+def _load_disk_cache(key: str) -> Optional[gpd.GeoDataFrame]:
+    from pathlib import Path
+
+    p = _disk_cache_path(key)
+    try:
+        if not p.is_file():
+            return None
+        age = time.time() - p.stat().st_mtime
+        if age > _DISK_CACHE_TTL_S:
+            return None
+        gdf = gpd.read_file(p)
+        if gdf is None or gdf.empty:
+            return None
+        if gdf.crs is None:
+            gdf = gdf.set_crs("EPSG:4326")
+        log.info("water disk-cache hit age=%.0fs n=%s", age, len(gdf))
+        return gdf
+    except Exception as e:
+        log.warning("water disk-cache load fail: %s", e)
+        return None
+
+
+def _save_disk_cache(key: str, gdf: gpd.GeoDataFrame) -> None:
+    if gdf is None or gdf.empty:
+        return
+    try:
+        p = _disk_cache_path(key)
+        gdf.to_file(p, driver="GeoJSON")
+    except Exception as e:
+        log.warning("water disk-cache save fail: %s", e)
 
 
 def fetch_water(
     bbox: Tuple[float, float, float, float],
-    timeout: float = 45.0,
+    timeout: float = 55.0,
     use_cache: bool = True,
     allow_empty_on_error: bool = False,
 ) -> gpd.GeoDataFrame:
     """按 bbox 拉水系 GeoDataFrame (EPSG:4326).
 
     allow_empty_on_error=True 时，全部失败返回空 gdf 而非抛错。
+    成功结果写内存 + 磁盘缓存；全失败时优先回退磁盘缓存（减偶发空白层）。
     """
     key = f"water:{round(bbox[0], 4)},{round(bbox[1], 4)},{round(bbox[2], 4)},{round(bbox[3], 4)}"
     if use_cache and key in _MEM_CACHE:
@@ -221,16 +270,37 @@ def fetch_water(
             query = _build_query(bbox, simple=simple)
             data = _fetch_overpass(query, timeout=timeout)
             gdf = _elements_to_gdf(data)
+            # 完整查询空结果时再试 simple（部分镜像截断大响应）
+            if gdf.empty and not simple:
+                log.warning("fetch_water full query empty, try simple")
+                continue
             if use_cache:
                 _MEM_CACHE[key] = (time.time(), gdf)
                 if len(_MEM_CACHE) > _MEM_CACHE_MAX:
                     oldest = min(_MEM_CACHE, key=lambda k: _MEM_CACHE[k][0])
                     _MEM_CACHE.pop(oldest, None)
+                if not gdf.empty:
+                    _save_disk_cache(key, gdf)
             return gdf
         except Exception as e:
             last_err = e
             log.warning("fetch_water attempt simple=%s failed: %s", simple, e)
             continue
+
+    # Overpass 全失败：磁盘缓存兜底（避免 UI 偶发无水系）
+    if use_cache:
+        cached = _load_disk_cache(key)
+        if cached is not None and not cached.empty:
+            log.warning("fetch_water using disk cache after Overpass fail: %s", last_err)
+            _MEM_CACHE[key] = (time.time(), cached)
+            # 标记属性供上层 warning（GeoDataFrame attrs）
+            try:
+                cached = cached.copy()
+                cached.attrs["from_disk_cache"] = True
+                cached.attrs["cache_error"] = str(last_err)[:200] if last_err else ""
+            except Exception:
+                pass
+            return cached
 
     if allow_empty_on_error:
         log.error("fetch_water giving empty result: %s", last_err)

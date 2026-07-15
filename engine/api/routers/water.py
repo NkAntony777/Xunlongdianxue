@@ -38,6 +38,12 @@ def water_fetch(req: WaterFetchRequest):
         gdf = fetch_water_for_analysis(
             req.lon, req.lat, radius_km, target_crs=target,
         )
+        # 磁盘缓存回退：有数据但 Overpass 当次失败
+        try:
+            if gdf is not None and getattr(gdf, "attrs", None) and gdf.attrs.get("from_disk_cache"):
+                warning = "水系服务不稳定，已使用近期缓存"
+        except Exception:
+            pass
     except Exception as e:
         try:
             gdf = fetch_water_for_analysis(
@@ -45,7 +51,13 @@ def water_fetch(req: WaterFetchRequest):
                 target_crs=target,
                 allow_empty_on_error=True,
             )
-            warning = f"水系服务不稳定，已降级：{e}"
+            try:
+                if gdf is not None and not gdf.empty and getattr(gdf, "attrs", None) and gdf.attrs.get("from_disk_cache"):
+                    warning = "水系服务不稳定，已使用近期缓存"
+                else:
+                    warning = f"水系服务不稳定，已降级：{e}"
+            except Exception:
+                warning = f"水系服务不稳定，已降级：{e}"
         except Exception as e2:
             return {
                 "count": 0,
@@ -54,9 +66,11 @@ def water_fetch(req: WaterFetchRequest):
                 "crs": "EPSG:4326",
                 "warning": f"水系拉取失败，已跳过：{e2}",
                 "degraded": True,
+                "ok": False,
             }
 
     if gdf is None or gdf.empty:
+        # 空结果：仅有真实服务故障时标 degraded；「范围内无要素」不标不完整
         return {
             "count": 0,
             "features": [],
@@ -64,6 +78,7 @@ def water_fetch(req: WaterFetchRequest):
             "crs": "EPSG:4326",
             "warning": warning or "范围内未检索到水系要素",
             "degraded": bool(warning),
+            "ok": not bool(warning),
         }
 
     # 强制清理无效几何
@@ -73,6 +88,19 @@ def water_fetch(req: WaterFetchRequest):
     except Exception:
         pass
 
+    if gdf is None or gdf.empty:
+        return {
+            "count": 0,
+            "features": [],
+            "bbox_lonlat": list(bbox),
+            "crs": "EPSG:4326",
+            "warning": warning or "水系几何清理后为空",
+            "degraded": True,
+            "ok": False,
+        }
+
+    # 磁盘缓存回退时附带提示（数据可用，略旧）
+    from_cache = bool(warning and "缓存" in str(warning))
     gj = json.loads(gdf.to_json())
     return {
         "count": int(len(gdf)),
@@ -80,5 +108,7 @@ def water_fetch(req: WaterFetchRequest):
         "crs": str(gdf.crs) if gdf.crs else target,
         "features": gj.get("features", []),
         "warning": warning,
-        "degraded": bool(warning),
+        "degraded": bool(warning) and not from_cache,
+        "ok": True,
+        "from_cache": from_cache,
     }

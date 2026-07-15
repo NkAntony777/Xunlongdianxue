@@ -159,32 +159,93 @@ def score_openness(
     slope_arr: np.ndarray | None = None,
     forward_sector_deg: float = 180.0,
     radius_m: float = 500.0,
+    *,
+    elev_arr: np.ndarray | None = None,
 ) -> int:
-    """明堂开阔度评分：前向扇区平均坡度越低越开阔。
+    """明堂开阔度：前向扇区 **缓坡 + 低起伏 + 不欺主**。
+
+    对标河湾平坦明堂（参考图橙心）：
+      - 平均坡度低 → 开阔
+      - 高程标准差低 → 平坦平台
+      - 扇区相对穴的抬升不过高 → 不逼压、案不欺主
+      - 近场 (50–220m) 与外明堂 (220–radius) 加权
 
     默认前向为南（180°），可通过参数改变。
     """
     if slope_arr is None:
         slope_arr, _ = compute_slope_aspect(dem)
-    h, w = dem.data.shape
+    elev = elev_arr if elev_arr is not None else dem.data
+    h, w = elev.shape
     cy, cx = h // 2, w // 2
     from engine.core.terrain_analysis import _is_geographic
     if _is_geographic(dem.crs):
         m_per_unit = 111000.0
     else:
         m_per_unit = 1.0
-    yres, xres = dem.resolution[1] * m_per_unit, dem.resolution[0] * m_per_unit
+    yres = abs(dem.resolution[1]) * m_per_unit
+    xres = abs(dem.resolution[0]) * m_per_unit
     yy, xx = np.mgrid[0:h, 0:w]
+    # 北 = row 减小 → dy 北正
     dx_m = (xx - cx) * xres
-    dy_m = (yy - cy) * yres
-    dist_m = np.sqrt(dx_m**2 + dy_m**2)
-    bearing = (np.degrees(np.arctan2(dx_m, dy_m)) + 360) % 360
-    diff = np.abs(((bearing - forward_sector_deg + 180) % 360) - 180)
-    region = (diff <= 90) & (dist_m > 50) & (dist_m <= radius_m) & np.isfinite(dem.data)
+    dy_m = (cy - yy) * yres
+    dist_m = np.hypot(dx_m, dy_m)
+    bearing = (np.degrees(np.arctan2(dx_m, dy_m)) + 360.0) % 360.0
+    diff = np.abs(((bearing - float(forward_sector_deg) + 180.0) % 360.0) - 180.0)
+    finite = np.isfinite(elev) & np.isfinite(slope_arr)
+    # 前向 75° 半宽（略收，更贴「明堂正向」）
+    region = (diff <= 75.0) & (dist_m > 40.0) & (dist_m <= radius_m) & finite
     if not region.any():
         return 50
-    mean_slope = float(np.nanmean(slope_arr[region]))
-    return clamp_score(100 - mean_slope * 4)
+
+    cand_z = float(elev[cy, cx]) if np.isfinite(elev[cy, cx]) else float(np.nanmean(elev[region]))
+    slopes = slope_arr[region]
+    zs = elev[region]
+    mean_slope = float(np.nanmean(slopes))
+    std_z = float(np.nanstd(zs)) if zs.size > 2 else 20.0
+    mean_rel = float(np.nanmean(zs - cand_z))
+    max_rel = float(np.nanmax(zs - cand_z))
+
+    # 坡度分：0–6° 近满分，>20° 明显扣
+    s_slope = float(np.clip(100.0 - mean_slope * 5.5, 15.0, 100.0))
+    if mean_slope <= 3.0:
+        s_slope = max(s_slope, 96.0)
+    elif mean_slope <= 6.0:
+        s_slope = max(s_slope, 90.0)
+
+    # 平坦分：高程 σ 小 = 明堂平台
+    # σ≤3m → ~95；σ=15m → ~55；σ≥30m → ~25
+    s_flat = float(np.clip(100.0 - std_z * 3.2, 20.0, 100.0))
+    if std_z <= 4.0:
+        s_flat = max(s_flat, 94.0)
+
+    # 不欺主：前向相对抬升不宜过高（案/朝可有，但明堂腹地宜平）
+    if max_rel <= 15.0:
+        s_no_bully = 95.0
+    elif max_rel <= 40.0:
+        s_no_bully = 95.0 - (max_rel - 15.0) * 1.2
+    else:
+        s_no_bully = max(30.0, 65.0 - (max_rel - 40.0) * 0.8)
+    # 平均也略抬则减
+    if mean_rel > 20.0:
+        s_no_bully -= min(25.0, (mean_rel - 20.0) * 0.9)
+
+    # 近明堂（内堂）更看重平坦；外堂略看开阔距离
+    near = region & (dist_m <= min(220.0, radius_m * 0.45))
+    if near.any():
+        near_slope = float(np.nanmean(slope_arr[near]))
+        near_std = float(np.nanstd(elev[near])) if elev[near].size > 2 else std_z
+        s_inner = 0.55 * float(np.clip(100.0 - near_slope * 6.0, 20.0, 100.0)) + 0.45 * float(
+            np.clip(100.0 - near_std * 3.5, 20.0, 100.0)
+        )
+    else:
+        s_inner = 0.5 * (s_slope + s_flat)
+
+    # 综合：坡 25% + 平坦 32% + 不欺主 13% + 内堂 30%（内堂/平坦权更大 → 堂心）
+    score = 0.25 * s_slope + 0.32 * s_flat + 0.13 * s_no_bully + 0.30 * s_inner
+    # 极平坦内堂再抬一档（河湾明堂心）
+    if s_flat >= 90.0 and s_inner >= 88.0 and mean_slope <= 5.0:
+        score = min(100.0, score + 4.0)
+    return clamp_score(score)
 
 
 def filter_candidates_off_water(
@@ -237,6 +298,7 @@ def search_candidates(
     ban_buffer_m: float = 60.0,
     qi_grid: np.ndarray | None = None,
     qi_min_percentile: float = 60.0,
+    min_dist_m: float = 200.0,
 ) -> list[AcupointCandidate]:
     """在整个 DEM 上滑动窗口搜索候选穴。
 
@@ -251,6 +313,7 @@ def search_candidates(
         ban_buffer_m: 水禁缓冲（米），与场评 WATER_BAN_BUFFER 一致
         qi_grid: 可选生气场（0–100）；提供时只在高 qi 分位内出候选
         qi_min_percentile: qi 阈值分位（默认 top 40%：≥P60）
+        min_dist_m: 非极大值抑制最小间距（米）；明堂可略小以保留橙心点
 
     Returns:
         候选穴列表，按 form/qi 综合分降序
@@ -303,8 +366,10 @@ def search_candidates(
         if valid_qi.any():
             qi_thr = float(np.nanpercentile(qi_grid[valid_qi], qi_min_percentile))
 
-    for r in range(px_radius, h - px_radius, step):
-        for c in range(px_radius, w - px_radius, step):
+    # 避开图缘（假脊/坏坐标常出在边角，UI 会堆到左上）
+    edge_m = max(px_radius + 2, int(round(100.0 / max(cell_m, 1.0))))
+    for r in range(edge_m, h - edge_m, step):
+        for c in range(edge_m, w - edge_m, step):
             if not np.isfinite(dem.data[r, c]):
                 continue
             if water_ban is not None and water_ban[r, c]:
@@ -331,9 +396,16 @@ def search_candidates(
                     form_score = int(max(0, form_score - 8))  # 过湿积水
                 elif 0 < twi_v < 1.0:
                     form_score = int(max(0, form_score - 3))  # 过干
-            # 有 qi 时：排序主看场分，形态为辅（对齐热力）
+            # 有 qi 时：排序主看场分，形态为辅（对齐热力橙心）
             if qi_v is not None:
-                form_score = int(round(0.30 * form_score + 0.70 * qi_v))
+                # 平坦明堂（平缓 + 高 qi）再抬，避免只出坡脚/乳突点
+                flat_boost = 0
+                if form in ("平缓", "窝穴") and qi_v >= 70:
+                    flat_boost = 8
+                elif form in ("平缓", "窝穴") and qi_v >= 55:
+                    flat_boost = 4
+                form_score = int(round(0.22 * form_score + 0.78 * qi_v + flat_boost))
+                form_score = int(min(100, form_score))
             x, y = dem.xy(r, c)
             cand = AcupointCandidate(
                 row=r,
@@ -358,7 +430,7 @@ def search_candidates(
     # 非极大值抑制：相距 < min_dist_m 的只保留 score 最高的
     cands.sort(key=lambda x: -x.form_score)
     kept: list[AcupointCandidate] = []
-    min_dist_m = 200.0
+    min_dist_m = float(min_dist_m) if min_dist_m is not None else 200.0
     from engine.core.terrain_analysis import _is_geographic
 
     geographic = _is_geographic(dem.crs)

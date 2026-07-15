@@ -650,6 +650,98 @@ def vectorize_ridges(
     return ridges
 
 
+def refine_entrance_on_ordered(
+    dem: DEM,
+    ordered_coords: np.ndarray,
+    *,
+    window: int = 7,
+    water_dist: np.ndarray | None = None,
+    assume_high_to_low: bool = True,
+) -> tuple[tuple[int, int] | None, dict]:
+    """在已定向脊（源→入首）上精炼入首点：尾段曲率极大 + 高程急降。
+
+    Args:
+        ordered_coords: (N,2) 已从源到入首端排序的脊点
+        assume_high_to_low: True 时不再反转；False 时自动高→低
+    Returns:
+        ((row, col) | None, meta)
+    """
+    coords = np.asarray(ordered_coords)
+    n = len(coords)
+    meta = {"method": "curv_drop", "refined": False, "score": 0.0}
+    if n < 3:
+        return None, meta
+    if n < 20:
+        # 短脊：较低端点
+        e0 = float(dem.data[int(coords[0, 0]), int(coords[0, 1])])
+        e1 = float(dem.data[int(coords[-1, 0]), int(coords[-1, 1])])
+        i = n - 1
+        if assume_high_to_low:
+            i = n - 1
+        else:
+            i = 0 if (np.isfinite(e0) and e0 <= e1) else n - 1
+        meta["refined"] = True
+        meta["method"] = "short_end"
+        return (int(coords[i, 0]), int(coords[i, 1])), meta
+
+    elevs = np.full(n, np.nan, dtype=np.float64)
+    for i in range(n):
+        r, c = int(coords[i, 0]), int(coords[i, 1])
+        if 0 <= r < dem.data.shape[0] and 0 <= c < dem.data.shape[1]:
+            elevs[i] = dem.data[r, c]
+
+    if not assume_high_to_low:
+        if np.nanmean(elevs[: max(3, n // 5)]) < np.nanmean(elevs[-max(3, n // 5) :]):
+            coords = coords[::-1].copy()
+            elevs = elevs[::-1].copy()
+
+    dh = np.diff(elevs, prepend=elevs[0])
+    dh = np.where(np.isfinite(dh), dh, 0.0)
+    ker = np.ones(max(3, window)) / max(3, window)
+    drop_signal = -np.convolve(dh, ker, mode="same")
+    d2 = np.diff(dh, prepend=dh[0])
+    curv_signal = np.abs(np.convolve(d2, ker, mode="same"))
+
+    # 脊线平面曲率（折角）— 第三判据：入首处常有转向
+    plan_curv = np.zeros(n, dtype=np.float64)
+    for i in range(1, n - 1):
+        v1 = coords[i].astype(float) - coords[i - 1].astype(float)
+        v2 = coords[i + 1].astype(float) - coords[i].astype(float)
+        n1 = float(np.hypot(v1[0], v1[1])) + 1e-9
+        n2 = float(np.hypot(v2[0], v2[1])) + 1e-9
+        cosv = float(np.clip(np.dot(v1, v2) / (n1 * n2), -1.0, 1.0))
+        plan_curv[i] = 1.0 - cosv  # 0 直、2 回折
+
+    tail_n = max(8, n // 3)
+    start = n - tail_n
+    best_i = n - 1
+    best_s = -1e18
+    for i in range(start, n):
+        r, c = int(coords[i, 0]), int(coords[i, 1])
+        # 三重：急降 + 高程二阶 + 平面折角
+        s = (
+            1.0 * float(drop_signal[i])
+            + 0.55 * float(curv_signal[i])
+            + 1.2 * float(plan_curv[i])
+        )
+        # 脊线终止：越靠近末端略加分（真正「到头」）
+        s += 0.15 * (i - start) / max(tail_n - 1, 1)
+        if water_dist is not None and 0 <= r < water_dist.shape[0] and 0 <= c < water_dist.shape[1]:
+            dw = float(water_dist[r, c]) if np.isfinite(water_dist[r, c]) else 1e9
+            if 40.0 <= dw <= 900.0:
+                s += 1.2
+            elif dw < 25.0:
+                s -= 0.8
+        if s > best_s:
+            best_s = s
+            best_i = i
+    meta["refined"] = True
+    meta["score"] = float(best_s)
+    meta["index"] = int(best_i)
+    meta["tail_frac"] = float(best_i / max(n - 1, 1))
+    return (int(coords[best_i, 0]), int(coords[best_i, 1])), meta
+
+
 def find_entrance_on_ridge(
     ridge: RidgeLine,
     dem: DEM,
@@ -662,53 +754,10 @@ def find_entrance_on_ridge(
     调研 §5.6：末端节点 + 局部曲率突变，非简单最低点。
     """
     coords = ridge.coords
-    n = len(coords)
-    if n < 20:
-        if n < 3:
-            return None
-        # 短脊：取较低端点
-        e0 = float(dem.data[int(coords[0, 0]), int(coords[0, 1])])
-        e1 = float(dem.data[int(coords[-1, 0]), int(coords[-1, 1])])
-        i = 0 if (np.isfinite(e0) and e0 <= e1) else n - 1
-        return (int(coords[i, 0]), int(coords[i, 1]))
-
-    elevs = np.full(n, np.nan, dtype=np.float64)
-    for i in range(n):
-        r, c = int(coords[i, 0]), int(coords[i, 1])
-        if 0 <= r < dem.data.shape[0] and 0 <= c < dem.data.shape[1]:
-            elevs[i] = dem.data[r, c]
-
-    # 保证「从头到尾」大致高→低，便于末端=入首侧
-    if np.nanmean(elevs[: max(3, n // 5)]) < np.nanmean(elevs[-max(3, n // 5):]):
-        coords = coords[::-1].copy()
-        elevs = elevs[::-1].copy()
-
-    dh = np.diff(elevs, prepend=elevs[0])
-    dh = np.where(np.isfinite(dh), dh, 0.0)
-    # 下降强度（正=降）
-    ker = np.ones(max(3, window)) / max(3, window)
-    drop_signal = -np.convolve(dh, ker, mode="same")
-    d2 = np.diff(dh, prepend=dh[0])
-    curv_signal = np.abs(np.convolve(d2, ker, mode="same"))
-
-    tail_n = max(8, n // 3)
-    start = n - tail_n
-    best_i = start
-    best_s = -1e18
-    for i in range(start, n):
-        r, c = int(coords[i, 0]), int(coords[i, 1])
-        s = float(drop_signal[i]) + 0.5 * float(curv_signal[i])
-        # 近水甜区
-        if water_dist is not None and 0 <= r < water_dist.shape[0] and 0 <= c < water_dist.shape[1]:
-            dw = float(water_dist[r, c]) if np.isfinite(water_dist[r, c]) else 1e9
-            if 40.0 <= dw <= 900.0:
-                s += 1.2
-            elif dw < 25.0:
-                s -= 0.8
-        if s > best_s:
-            best_s = s
-            best_i = i
-    return (int(coords[best_i, 0]), int(coords[best_i, 1]))
+    pt, _meta = refine_entrance_on_ordered(
+        dem, coords, window=window, water_dist=water_dist, assume_high_to_low=False,
+    )
+    return pt
 
 
 def find_entrance_point(
@@ -989,6 +1038,17 @@ def orient_ridge_to_hole(
         choice = "tail_source"
         conf = sc_b - sc_a
 
+    # 入首精确定位：在有序脊（源→入首端）的尾段用「曲率极大 + 高程急降」
+    # 取代单纯端点（报告 06 §2.1）
+    ent_refined, refine_meta = refine_entrance_on_ordered(
+        dem, ordered, water_dist=water_dist,
+    )
+    if ent_refined is not None:
+        ent = ent_refined
+        er, ec = int(ent[0]), int(ent[1])
+        if 0 <= er < dem.data.shape[0] and 0 <= ec < dem.data.shape[1]:
+            e_ent = float(dem.data[er, ec]) if np.isfinite(dem.data[er, ec]) else e_ent
+
     flow_az = _bearing_rc(src[0], src[1], ent[0], ent[1], mpx, mpy)
     # 坐：穴看向源
     sit = _bearing_rc(center_row, center_col, src[0], src[1], mpx, mpy)
@@ -1008,6 +1068,7 @@ def orient_ridge_to_hole(
         "dist_source_m": float(_d_hole(*src)),
         "dist_entrance_end_m": float(_d_hole(*ent)),
         "ends_opposite": ends_opposite,
+        "entrance_refine": refine_meta,
     }
     return ordered, meta
 
@@ -1105,15 +1166,39 @@ def select_primary_dragon(
     ar, ac = int(np.clip(anchor_row, 0, hh - 1)), int(np.clip(anchor_col, 0, ww - 1))
 
     wd = None
+    water_surface = None
     try:
-        from engine.core.four_beasts_detect import water_distance_rasters
+        from engine.core.four_beasts_detect import (
+            water_distance_rasters,
+            _segment_hits_water,
+            _ridge_path_crosses_water,
+        )
 
         if water is not None and not getattr(water, "empty", True):
-            wd, _ban = water_distance_rasters(dem, water, ban_buffer_m=0.0)
+            wd, water_surface = water_distance_rasters(dem, water, ban_buffer_m=0.0)
             if not np.isfinite(wd).any():
                 wd = None
+            if water_surface is None or not np.any(water_surface):
+                if wd is not None:
+                    water_surface = np.isfinite(wd) & (
+                        wd < max(1.0, min(mpx, mpy) * 0.6)
+                    )
+            # 膨胀水面：单像元河线选龙时不漏跨水
+            if water_surface is not None and np.any(water_surface):
+                try:
+                    from scipy.ndimage import binary_dilation
+                    water_surface = binary_dilation(
+                        water_surface.astype(bool), iterations=2,
+                    )
+                    if wd is not None and np.isfinite(wd).any():
+                        water_surface = water_surface | (
+                            np.isfinite(wd) & (wd < max(35.0, min(mpx, mpy) * 1.2))
+                        )
+                except Exception:
+                    pass
     except Exception:
         wd = None
+        water_surface = None
 
     water_face_az: float | None = None
     if water is not None and not getattr(water, "empty", True):
@@ -1179,6 +1264,26 @@ def select_primary_dragon(
             # 龙气（源→入首）宜与「穴→水」大致同向（面水收气）
             face_water_sc = 1.0 - _ang_diff(flow_az, water_face_az) / 180.0
 
+        # —— 水界龙止：源/脊跨主河道 → 重罚（优先同岸来龙）——
+        cross_src = False
+        path_cross = False
+        if water_surface is not None and np.any(water_surface):
+            try:
+                cross_src = _segment_hits_water(
+                    water_surface, ar, ac, sr, sc_,
+                    n_samples=28, end_skip=0.10,
+                )
+                path_cross = _ridge_path_crosses_water(
+                    water_surface, ordered, min_hits=2,
+                    sample_stride=max(1, len(ordered) // 40),
+                )
+            except Exception:
+                cross_src = False
+                path_cross = False
+        om = dict(om)
+        om["source_across_water"] = bool(cross_src)
+        om["ridge_path_crosses_water"] = bool(path_cross)
+
         # 锚点贴脊 + 源远于入首端（祖远父近）
         near_ridge_sc = max(0.0, 1.0 - d_ridge / 600.0)
         geometry_sc = 0.0
@@ -1221,6 +1326,11 @@ def select_primary_dragon(
             sc -= 0.8
         if d_ridge > 900.0:
             sc -= 1.5  # 离热峰/穴太远的脊降权
+        # 界水则止：隔岸来龙大减 / 脊线过水脉断
+        if cross_src:
+            sc -= 4.5
+        if path_cross:
+            sc -= 2.5
 
         if sc > best_sc:
             best_sc = sc
@@ -1572,32 +1682,64 @@ def pick_xuanwu_shaozu_on_ridge(
     mpx: float,
     mpy: float,
     *,
-    xuanwu_dist: tuple[float, float] = (50.0, 500.0),
-    shaozu_dist: tuple[float, float] = (500.0, 8000.0),
-    xw_dh_sweet: tuple[float, float] = (15.0, 150.0),
+    xuanwu_dist: tuple[float, float] = (200.0, 700.0),
+    shaozu_dist: tuple[float, float] = (1000.0, 8000.0),
+    xw_dh_sweet: tuple[float, float] = (25.0, 150.0),
     forbid_mask: np.ndarray | None = None,
+    water_surface: np.ndarray | None = None,
     sector_half: float | None = 50.0,
     require_sector: bool = True,
     source_first: bool = False,
+    reject_cross_water: bool = True,
+    shaozu_xw_ratio: float = 2.0,
+    xuanwu_min_hard_m: float | None = None,
 ) -> tuple[RidgePoint | None, RidgePoint | None, dict[str, Any]]:
     """在脊点上切父母山与少祖。
 
-    Args:
-        ordered_coords: 若 source_first=True 则为「源→入首」；否则「近穴→远」
-        sit_deg / sector_half: 传统坐向扇区约束；主龙路径可 require_sector=False
-        source_first: 少祖优先取脊**源端**高峰（峦头：祖在来龙源头）
+    距离窗由调用方按局尺度 L 换算后传入（比例制）；本函数只做：
+      - 窗内 + 高差甜区选父母
+      - 少祖 dist ≥ 玄武 × ratio，优先脊源端（拓扑）
     """
     cand_elev = float(dem.data[center_row, center_col])
     h, w = dem.data.shape
-    meta: dict[str, Any] = {"source_first": source_first, "require_sector": require_sector}
+    meta: dict[str, Any] = {
+        "source_first": source_first,
+        "require_sector": require_sector,
+        "reject_cross_water": reject_cross_water,
+        "cross_water_skipped": 0,
+        "shaozu_xw_ratio": shaozu_xw_ratio,
+    }
     n = len(ordered_coords) if ordered_coords is not None else 0
+    # 硬下限 = 窗下界（调用方已按 L 比例算好）；不再叠加绝对米
+    xw_d_lo = float(xuanwu_dist[0])
+    if xuanwu_min_hard_m is not None:
+        xw_d_lo = max(xw_d_lo, float(xuanwu_min_hard_m))
+    xw_d_hi = float(xuanwu_dist[1])
+    xuanwu_min_hard_m = xw_d_lo
+
+    def _crosses_water(r: int, c: int) -> bool:
+        if not reject_cross_water or water_surface is None:
+            return False
+        try:
+            from engine.core.four_beasts_detect import _segment_hits_water
+            return _segment_hits_water(
+                water_surface, center_row, center_col, r, c,
+                n_samples=28, end_skip=0.10,
+            )
+        except Exception:
+            return False
 
     def _ok_cell(r: int, c: int) -> bool:
         if not (0 <= r < h and 0 <= c < w):
             return False
         if forbid_mask is not None and forbid_mask.shape == (h, w) and forbid_mask[r, c]:
             return False
-        return bool(np.isfinite(dem.data[r, c]))
+        if not bool(np.isfinite(dem.data[r, c])):
+            return False
+        if _crosses_water(r, c):
+            meta["cross_water_skipped"] = int(meta.get("cross_water_skipped", 0)) + 1
+            return False
+        return True
 
     def _mk(r: int, c: int, sc: float) -> RidgePoint:
         elev = float(dem.data[r, c])
@@ -1613,7 +1755,7 @@ def pick_xuanwu_shaozu_on_ridge(
             return True
         return _ang_diff(brg, float(sit_deg)) <= float(sector_half)
 
-    # —— 玄武：距穴父母窗 + 高差甜区（主龙上不强制绝对方位）——
+    # —— 玄武：父母窗硬下限 + 高差甜区；偏好窗中段（不贴身）——
     best_xw: RidgePoint | None = None
     best_xw_s = -1e18
     for r, c in ordered_coords:
@@ -1621,123 +1763,166 @@ def pick_xuanwu_shaozu_on_ridge(
         if not _ok_cell(r, c):
             continue
         dist = float(np.hypot((r - center_row) * mpy, (c - center_col) * mpx))
-        if dist < xuanwu_dist[0] * 0.6 or dist > xuanwu_dist[1] * 1.25:
+        if dist < xw_d_lo * 0.90 or dist > xw_d_hi * 1.20:
             continue
         brg = _bearing_rc(center_row, center_col, r, c, mpx, mpy)
         if not _in_sector(brg):
             continue
         elev = float(dem.data[r, c])
         rel = elev - cand_elev
-        if rel < 2.0:
+        if rel < 5.0:
             continue
-        d_lo, d_hi = xuanwu_dist
+        d_lo, d_hi = xw_d_lo, xw_d_hi
+        # 偏好窗中后段（靠山有势，非最近丘）
+        mid = 0.55 * d_lo + 0.45 * d_hi
         if d_lo <= dist <= d_hi:
-            s_dist = 1.0 - 0.15 * abs(dist - 0.5 * (d_lo + d_hi)) / max(d_hi - d_lo, 1.0)
+            s_dist = 1.0 - 0.18 * abs(dist - mid) / max(d_hi - d_lo, 1.0)
         elif dist < d_lo:
-            s_dist = 0.5 * dist / d_lo
+            s_dist = 0.25 * dist / max(d_lo, 1.0)  # 贴身重罚
         else:
-            s_dist = 0.7 * np.exp(-(dist - d_hi) / max(d_hi, 1.0))
+            s_dist = 0.65 * np.exp(-(dist - d_hi) / max(d_hi, 1.0))
         dh_lo, dh_hi = xw_dh_sweet
         if dh_lo <= rel <= dh_hi:
             s_dh = 1.0
         elif rel < dh_lo:
-            s_dh = 0.5 * rel / max(dh_lo, 1.0)
+            s_dh = 0.45 * rel / max(dh_lo, 1.0)
         else:
             s_dh = max(-0.3, 0.8 * np.exp(-(rel - dh_hi) / 80.0))
         s_az = 1.0
         if sit_deg is not None and sector_half:
             s_az = 1.0 - _ang_diff(brg, float(sit_deg)) / max(float(sector_half), 1.0)
-        s = 1.4 * s_dist + 1.3 * s_dh + 0.5 * s_az + 0.3 * min(rel / 80.0, 1.2)
+        s = 1.55 * s_dist + 1.25 * s_dh + 0.45 * s_az + 0.25 * min(rel / 80.0, 1.2)
         if s > best_xw_s:
             best_xw_s = s
             best_xw = _mk(r, c, float(s))
 
     if best_xw is None and not require_sector:
-        # 放宽：脊上最近「高于穴」的点
+        # 放宽：脊上「够远够高」点，仍守硬下限
         for r, c in ordered_coords:
             r, c = int(r), int(c)
             if not _ok_cell(r, c):
                 continue
             dist = float(np.hypot((r - center_row) * mpy, (c - center_col) * mpx))
-            if dist < 30.0 or dist > max(xuanwu_dist[1] * 1.5, 800.0):
+            if dist < xw_d_lo * 0.9 or dist > xw_d_hi * 1.45:
                 continue
             elev = float(dem.data[r, c])
-            if elev < cand_elev + 1.0:
+            if elev < cand_elev + 3.0:
                 continue
-            s = 1.0 / max(dist, 1.0) + (elev - cand_elev) / 80.0
+            # 略偏中距，忌 1/dist 把点吸到贴身
+            mid = 0.55 * xw_d_lo + 0.45 * xw_d_hi
+            s = 1.0 - abs(dist - mid) / max(xw_d_hi, 1.0) + (elev - cand_elev) / 70.0
+            if dist < xw_d_lo:
+                s *= 0.55
             if s > best_xw_s:
                 best_xw_s = s
                 best_xw = _mk(r, c, float(s))
 
     if best_xw is None:
         return None, None, {"reason": "no_xuanwu_on_ridge"}
+    if best_xw.dist_m < xw_d_lo * 0.85:
+        return None, None, {"reason": "xuanwu_too_close", "dist_m": best_xw.dist_m}
 
-    # —— 少祖 ——
+    # —— 少祖：来龙上游、更远、宜更高（比例/拓扑，无绝对 800m）——
     best_sz: RidgePoint | None = None
     best_sz_s = -1e18
-    sz_lo = max(shaozu_dist[0], best_xw.dist_m * 1.15)
-    sz_hi = shaozu_dist[1]
+    sz_lo = max(float(shaozu_dist[0]), best_xw.dist_m * float(shaozu_xw_ratio))
+    sz_hi = float(shaozu_dist[1])
+    meta["sz_lo_m"] = sz_lo
+    meta["xw_dist_m"] = best_xw.dist_m
 
+    def _score_sz(i: int, r: int, c: int, dist: float, elev: float, brg: float) -> float:
+        colinear = 1.0 - _ang_diff(brg, best_xw.bearing_deg) / 70.0
+        s_elev = float(np.clip((elev - best_xw.elev_m) / 45.0, -0.4, 1.8))
+        s_az = 1.0
+        if sit_deg is not None:
+            s_az = 1.0 - _ang_diff(brg, float(sit_deg)) / 90.0
+        s_far = float(np.clip((dist - sz_lo) / max(sz_hi - sz_lo, 500.0), 0.0, 1.0))
+        s_src = 0.0
+        if source_first and n > 0:
+            s_src = 2.2 * (1.0 - i / max(n - 1, 1))
+        return (
+            0.75 * max(colinear, 0.0)
+            + 1.15 * s_elev
+            + 0.45 * max(s_az, 0.0)
+            + 1.35 * s_far
+            + s_src
+        )
+
+    # Pass1：源端 55% + 距离/高程硬窗
     for i, (r, c) in enumerate(ordered_coords):
         r, c = int(r), int(c)
         if not _ok_cell(r, c):
             continue
-        dist = float(np.hypot((r - center_row) * mpy, (c - center_col) * mpx))
-        if dist < sz_lo * 0.85 or dist > sz_hi:
+        if source_first and n > 6 and (i / max(n - 1, 1)) > 0.55:
             continue
-        if dist <= best_xw.dist_m * 1.05:
+        dist = float(np.hypot((r - center_row) * mpy, (c - center_col) * mpx))
+        if dist < sz_lo or dist > sz_hi:
             continue
         brg = _bearing_rc(center_row, center_col, r, c, mpx, mpy)
         if require_sector and not _in_sector(brg):
-            # 主龙源端可略放宽
             if not (source_first and sit_deg is not None
                     and _ang_diff(brg, float(sit_deg)) <= (sector_half or 55) + 35):
                 continue
         elev = float(dem.data[r, c])
-        if elev < best_xw.elev_m - 20.0:
+        if elev < best_xw.elev_m - 8.0:
             continue
-        colinear = 1.0 - _ang_diff(brg, best_xw.bearing_deg) / 60.0
-        s_elev = float(np.clip((elev - best_xw.elev_m) / 50.0, -0.3, 1.5))
-        s_az = 1.0
-        if sit_deg is not None:
-            s_az = 1.0 - _ang_diff(brg, float(sit_deg)) / 90.0
-        s_dist = float(np.clip(
-            1.0 - abs(dist - min(2000.0, 0.5 * (sz_lo + sz_hi))) / 3000.0, 0.0, 1.0
-        ))
-        # 源端优先：ordered 前段（源）加权
-        s_src = 0.0
-        if source_first and n > 0:
-            # i 越小越靠源
-            s_src = 1.2 * (1.0 - i / max(n - 1, 1))
-        s = (
-            1.0 * max(colinear, 0.0)
-            + 1.0 * s_elev
-            + 0.5 * max(s_az, 0.0)
-            + 0.4 * s_dist
-            + s_src
-        )
+        s = _score_sz(i, r, c, dist, elev, brg)
         if s > best_sz_s:
             best_sz_s = s
             best_sz = _mk(r, c, float(s))
 
-    # 主龙：若仍无少祖，取源端有效最高点
-    if best_sz is None and source_first and n > 0:
-        k = max(1, n // 5)
-        best_e = -1e18
-        best_rc = None
-        for r, c in ordered_coords[:k]:
+    # Pass2：整脊放宽源端限制
+    if best_sz is None:
+        for i, (r, c) in enumerate(ordered_coords):
             r, c = int(r), int(c)
             if not _ok_cell(r, c):
                 continue
-            elev = float(dem.data[r, c])
             dist = float(np.hypot((r - center_row) * mpy, (c - center_col) * mpx))
-            if dist < max(200.0, best_xw.dist_m * 1.1):
+            if dist < sz_lo or dist > sz_hi:
                 continue
-            if elev > best_e:
-                best_e = elev
-                best_rc = (r, c)
+            brg = _bearing_rc(center_row, center_col, r, c, mpx, mpy)
+            if require_sector and not _in_sector(brg):
+                continue
+            elev = float(dem.data[r, c])
+            if elev < best_xw.elev_m - 12.0:
+                continue
+            s = _score_sz(i, r, c, dist, elev, brg) - 0.3
+            if s > best_sz_s:
+                best_sz_s = s
+                best_sz = _mk(r, c, float(s))
+                meta["shaozu_pass"] = "full_ridge"
+
+    # Pass3：同岸最远够高
+    if best_sz is None and n > 0:
+        best_rc = None
+        best_combo = -1e18
+        for i, (r, c) in enumerate(ordered_coords):
+            r, c = int(r), int(c)
+            if not _ok_cell(r, c):
+                continue
+            dist = float(np.hypot((r - center_row) * mpy, (c - center_col) * mpx))
+            if dist < sz_lo:
+                continue
+            elev = float(dem.data[r, c])
+            if elev < cand_elev + 5.0:
+                continue
+            src_w = (1.0 - i / max(n - 1, 1)) if source_first else 0.5
+            combo = dist / max(sz_lo, 1.0) + elev / 150.0 + 2.0 * src_w
+            if elev >= best_xw.elev_m:
+                combo += 0.4
+            if combo > best_combo:
+                best_combo = combo
+                best_rc = (r, c, dist)
         if best_rc is not None:
-            best_sz = _mk(best_rc[0], best_rc[1], 0.5)
+            best_sz = _mk(best_rc[0], best_rc[1], 0.55)
+            meta["shaozu_fallback"] = "farthest_same_bank_upstream"
+        else:
+            meta["shaozu_fallback"] = "none_upstream_same_bank"
+
+    # 终检：少祖须明显远于玄武（比例）
+    if best_sz is not None and best_sz.dist_m < best_xw.dist_m * float(shaozu_xw_ratio):
+        meta["shaozu_rejected_too_close"] = True
+        best_sz = None
 
     meta["xuanwu_score"] = best_xw.score
     meta["shaozu_score"] = best_sz.score if best_sz else None
@@ -1751,13 +1936,15 @@ def beasts_from_primary_dragon(
     primary: PrimaryDragon,
     *,
     forbid_mask: np.ndarray | None = None,
-    xuanwu_dist: tuple[float, float] = (50.0, 500.0),
-    shaozu_dist: tuple[float, float] = (500.0, 8000.0),
+    xuanwu_dist: tuple[float, float] = (200.0, 700.0),
+    shaozu_dist: tuple[float, float] = (1000.0, 8000.0),
     water=None,
+    water_surface: np.ndarray | None = None,
 ) -> IncomingVeinSelection:
     """峦头正法：坐靠来龙，少祖=龙源，父母=近穴脊峰。
 
     先相对本穴 reorient 源/入首，避免南丘更高把祖钉在前。
+    水界龙止：源/祖若隔主河道则降权并尽量改取同岸脊点。
     """
     mpx, mpy = _m_per_px_dem(dem)
     primary = reorient_primary_to_hole(
@@ -1772,6 +1959,35 @@ def beasts_from_primary_dragon(
             score=-1e9, meta={},
         )
 
+    # 真水面栅格（供同岸判定）；优先用调用方传入的膨胀水面
+    _segment_hits_water = None
+    _ridge_path_crosses_water = None
+    try:
+        from engine.core.four_beasts_detect import (
+            water_distance_rasters,
+            _segment_hits_water,
+            _ridge_path_crosses_water,
+        )
+        if water_surface is None and water is not None and not getattr(water, "empty", True):
+            _wd0, water_surface = water_distance_rasters(
+                dem, water, ban_buffer_m=0.0,
+            )
+            if water_surface is None or not np.any(water_surface):
+                water_surface = (
+                    np.isfinite(_wd0) & (_wd0 < max(1.0, min(mpx, mpy) * 0.6))
+                )
+            # 本地膨胀，与 detect 一致
+            try:
+                from scipy.ndimage import binary_dilation
+                if water_surface is not None and np.any(water_surface):
+                    water_surface = binary_dilation(
+                        water_surface.astype(bool), iterations=2,
+                    )
+            except Exception:
+                pass
+    except Exception:
+        pass
+
     # 坐向：穴看向龙源；朝向：对向
     sit = float(primary.sit_deg)
     facing = float(primary.facing_deg)
@@ -1782,10 +1998,40 @@ def beasts_from_primary_dragon(
         xuanwu_dist=xuanwu_dist,
         shaozu_dist=shaozu_dist,
         forbid_mask=forbid_mask,
+        water_surface=water_surface,
         sector_half=80.0,
         require_sector=False,
         source_first=True,
+        reject_cross_water=True,
     )
+
+    # 脊线本身过水 → 记脉断（仍可返回同岸父母，但降权）
+    path_cross = False
+    if water_surface is not None:
+        try:
+            path_cross = _ridge_path_crosses_water(
+                water_surface, ordered, min_hits=2, sample_stride=max(1, len(ordered) // 40),
+            )
+        except Exception:
+            path_cross = False
+    pm = dict(pm or {})
+    pm["ridge_path_crosses_water"] = bool(path_cross)
+    if path_cross:
+        pm["theory_note"] = "脊线跨水：水界龙止，山龙气脉大减"
+
+    # 源端若隔水：少祖已在 pick 中跳过；再记源跨水标志
+    if water_surface is not None and len(ordered) > 0:
+        sr0, sc0 = int(ordered[0, 0]), int(ordered[0, 1])
+        try:
+            if _segment_hits_water(
+                water_surface, center_row, center_col, sr0, sc0,
+                n_samples=28, end_skip=0.10,
+            ):
+                pm["source_across_water"] = True
+                if sz is None:
+                    pm["shaozu_blocked"] = "source_across_water"
+        except Exception:
+            pass
 
     # 硬约束：少祖必须在「坐后」半区（与朝向差 > 90°），禁止落在前朱雀半区
     def _is_behind(bp: RidgePoint | None) -> bool:
@@ -1795,7 +2041,7 @@ def beasts_from_primary_dragon(
         return _ang_diff(bp.bearing_deg, facing) > 90.0
 
     if sz is not None and not _is_behind(sz):
-        # 丢弃前侧假祖，强制取源端
+        # 丢弃前侧假祖，强制取源端（仍须同岸）
         n = len(ordered)
         k = max(2, n // 4)
         best_e = -1e18
@@ -1807,9 +2053,20 @@ def beasts_from_primary_dragon(
                     continue
             if not np.isfinite(dem.data[r, c]):
                 continue
+            # 同岸
+            if water_surface is not None:
+                try:
+                    if _segment_hits_water(
+                        water_surface, center_row, center_col, r, c,
+                        n_samples=24, end_skip=0.10,
+                    ):
+                        continue
+                except Exception:
+                    pass
             elev = float(dem.data[r, c])
             dist = float(np.hypot((r - center_row) * mpy, (c - center_col) * mpx))
-            if dist < 120.0:
+            # 源端少祖：相对 shaozu 窗 / 玄武（调用方已比例化）
+            if dist < max(float(shaozu_dist[0]) * 0.75, 1.0):
                 continue
             brg = _bearing_rc(center_row, center_col, r, c, mpx, mpy)
             if _ang_diff(brg, facing) <= 90.0:
@@ -1850,7 +2107,7 @@ def beasts_from_primary_dragon(
         method="primary_dragon_classical",
         score=float(primary.score),
         meta={
-            "theory": "坐靠来龙；少祖龙源（相对穴后）；禁前侧假祖",
+            "theory": "坐靠来龙；少祖龙源（相对穴后）；禁前侧假祖；水界龙止同岸",
             "sit_deg": sit,
             "facing_deg": facing,
             "primary_ridge_idx": primary.ridge_idx,
@@ -1871,10 +2128,11 @@ def select_incoming_vein(
     *,
     peaks_mask: np.ndarray | None = None,
     forbid_mask: np.ndarray | None = None,
+    water_surface: np.ndarray | None = None,
     ridge_lines: list[RidgeLine] | None = None,
     ridge_mask: np.ndarray | None = None,
-    xuanwu_dist: tuple[float, float] = (50.0, 500.0),
-    shaozu_dist: tuple[float, float] = (500.0, 8000.0),
+    xuanwu_dist: tuple[float, float] = (200.0, 700.0),
+    shaozu_dist: tuple[float, float] = (1000.0, 8000.0),
     sector_half: float = 55.0,
 ) -> IncomingVeinSelection:
     """相对穴筛选主来龙，并在脊上切玄武（父母）与少祖。
@@ -1914,7 +2172,10 @@ def select_incoming_vein(
             xw, sz, pm = pick_xuanwu_shaozu_on_ridge(
                 dem, ordered, center_row, center_col, sit_deg, mpx, mpy,
                 xuanwu_dist=xuanwu_dist, shaozu_dist=shaozu_dist,
-                forbid_mask=forbid_mask, sector_half=sector_half,
+                forbid_mask=forbid_mask,
+                water_surface=water_surface,
+                sector_half=sector_half,
+                reject_cross_water=True,
             )
             flow_az = best_info.get("flow_azimuth_deg")
             if sz is not None:
@@ -1943,6 +2204,7 @@ def select_incoming_vein(
                     "sector_frac": best_info.get("sector_frac"),
                     "downhill_m": best_info.get("downhill_m"),
                     "pick": pm,
+                    "same_bank": True,
                 },
             )
 
@@ -1973,7 +2235,7 @@ def select_incoming_vein(
             score=-1e9, meta={},
         )
 
-    # 伪脊：坐向扇区内候选峰，按距穴排序
+    # 伪脊：坐向扇区内候选峰，按距穴排序（须同岸）
     pts = []
     for r, c in zip(rs.tolist(), cs.tolist()):
         dist = float(np.hypot((r - center_row) * mpy, (c - center_col) * mpx))
@@ -1982,6 +2244,16 @@ def select_incoming_vein(
         brg = _bearing_rc(center_row, center_col, r, c, mpx, mpy)
         if _ang_diff(brg, sit_deg) > sector_half + 15:
             continue
+        if water_surface is not None:
+            try:
+                from engine.core.four_beasts_detect import _segment_hits_water
+                if _segment_hits_water(
+                    water_surface, center_row, center_col, r, c,
+                    n_samples=24, end_skip=0.10,
+                ):
+                    continue
+            except Exception:
+                pass
         elev = float(dem.data[r, c])
         pts.append((dist, r, c, elev, brg))
     if len(pts) < 2:
@@ -2016,7 +2288,10 @@ def select_incoming_vein(
     xw, sz, pm = pick_xuanwu_shaozu_on_ridge(
         dem, coords, center_row, center_col, sit_deg, mpx, mpy,
         xuanwu_dist=xuanwu_dist, shaozu_dist=shaozu_dist,
-        forbid_mask=forbid_mask, sector_half=sector_half,
+        forbid_mask=forbid_mask,
+        water_surface=water_surface,
+        sector_half=sector_half,
+        reject_cross_water=True,
     )
 
     # 若少祖与玄武之间脊连通差，降权但仍可用

@@ -235,45 +235,19 @@ export async function selectCandidate(candId) {
 }
 
 function beastMarkerSvg(k, px, py, s) {
+  // 仅圆形标识（中心一字）；右侧面板已有全名，不再叠矩形标签
   const fill = BEAST_COLORS[k];
   const ring = BEAST_RING[k] || "#fff";
-  const soft = BEAST_SOFT[k] || "rgba(255,255,255,0.94)";
   const short = BEAST_SHORT[k] || "·";
-  const name = BEAST_NAMES[k];
   const isMajor = k === "xuanwu" || k === "shaozu";
-  const isDark = k === "xuanwu";
   const r = isMajor ? s * 1.45 : s * 1.2;
   const fs = s * 0.95;
-  const labelFs = s * 1.05;
-
-  // 标签偏移
-  let ox = 0, oy = 0;
-  if (k === "shaozu") oy = -s * 2.55;
-  else if (k === "xuanwu") oy = -s * 2.4;
-  else if (k === "zhuque") oy = s * 2.55;
-  else if (k === "qinglong") { ox = s * 2.7; oy = s * 0.15; }
-  else if (k === "baihu") { ox = -s * 2.7; oy = s * 0.15; }
-  const lx = px + ox;
-  const ly = py + oy;
-  const tw = name.length * labelFs * 0.92 + s * 1.4;
-  const th = labelFs * 1.7;
-  const textFill = isDark ? "#f8fafc" : fill;
-  const boardFill = soft;
-  const boardStroke = isDark ? ring : fill;
 
   let html = "";
-  // 连接细线到标签
-  html += `<line x1="${px.toFixed(2)}" y1="${py.toFixed(2)}" x2="${lx.toFixed(2)}" y2="${ly.toFixed(2)}" stroke="${fill}" stroke-width="${Math.max(0.8, s * 0.12)}" opacity="0.35"/>`;
-  // 外晕
   html += `<circle cx="${px.toFixed(2)}" cy="${py.toFixed(2)}" r="${(r * 1.55).toFixed(2)}" fill="${fill}" opacity="0.1"/>`;
-  // 白环 + 色芯
   html += `<circle cx="${px.toFixed(2)}" cy="${py.toFixed(2)}" r="${r.toFixed(2)}" fill="#fff" stroke="${ring}" stroke-width="${Math.max(1.6, s * 0.32)}" opacity="0.98"/>`;
   html += `<circle cx="${px.toFixed(2)}" cy="${py.toFixed(2)}" r="${(r * 0.72).toFixed(2)}" fill="${fill}" stroke="#fff" stroke-width="${Math.max(0.9, s * 0.14)}"/>`;
-  // 中心字
   html += `<text x="${px.toFixed(2)}" y="${(py + fs * 0.38).toFixed(2)}" font-size="${fs.toFixed(2)}" font-weight="800" fill="#fff" text-anchor="middle" font-family="system-ui,sans-serif" style="pointer-events:none">${short}</text>`;
-  // 标签板
-  html += `<rect x="${(lx - tw / 2).toFixed(2)}" y="${(ly - th * 0.68).toFixed(2)}" width="${tw.toFixed(2)}" height="${th.toFixed(2)}" rx="${(th * 0.4).toFixed(2)}" fill="${boardFill}" stroke="${boardStroke}" stroke-width="${Math.max(1.1, s * 0.18)}" opacity="0.97" filter="url(#beastShadow)"/>`;
-  html += `<text x="${lx.toFixed(2)}" y="${(ly + labelFs * 0.15).toFixed(2)}" font-size="${labelFs.toFixed(2)}" font-weight="700" fill="${textFill}" text-anchor="middle" font-family="system-ui,'Segoe UI','Microsoft YaHei',sans-serif" style="pointer-events:none">${name}</text>`;
   return html;
 }
 
@@ -344,8 +318,11 @@ export function renderOverlay() {
     }
     for (const k of BEAST_ORDER) {
       const b = state.fb[k];
-      if (!b) continue;
+      if (!b || b.x == null || b.y == null) continue;
+      if (!Number.isFinite(b.x) || !Number.isFinite(b.y)) continue;
       const [px, py] = worldToImg(b.x, b.y);
+      if (!Number.isFinite(px) || !Number.isFinite(py)) continue;
+      if (px < -2 || py < -2 || px > W + 2 || py > H + 2) continue;
       html += beastMarkerSvg(k, px, py, s);
     }
   }
@@ -363,15 +340,16 @@ export function renderOverlay() {
 
   if (v.candidates && state.candidates.length) {
     state.candidates.forEach((c, idx) => {
-      const [px, py] = worldToImg(c.x, c.y);
-      const isSel = state.selectedCand === c.id;
-      if (!isSel && state.peakXY) {
-        const dx = c.x - state.peakXY[0], dy = c.y - state.peakXY[1];
-        if (Math.hypot(dx, dy) < (state.bbox[2] - state.bbox[0]) * 0.008) return;
+      if (c.x == null || c.y == null || !Number.isFinite(c.x) || !Number.isFinite(c.y)) {
+        return; // 无效坐标勿画到左上角
       }
+      const [px, py] = worldToImg(c.x, c.y);
+      if (!Number.isFinite(px) || !Number.isFinite(py)) return;
+      if (px < -2 || py < -2 || px > W + 2 || py > H + 2) return;
+      const isSel = state.selectedCand === c.id;
+      // 明堂橙心必须显示候选（不再因靠近场评最高点而隐藏）
       const r = isSel ? s * 1.25 : s * 0.78;
       const rank = c.rank || (idx + 1);
-      // 可点击 hit 区
       html += `<circle class="cand-hit" data-cand="${esc(c.id)}" cx="${px.toFixed(2)}" cy="${py.toFixed(2)}" r="${(r * 2.2).toFixed(2)}" fill="transparent" style="cursor:pointer"/>`;
       if (isSel) {
         html += `<circle cx="${px.toFixed(2)}" cy="${py.toFixed(2)}" r="${(r * 1.55).toFixed(2)}" fill="#dc2626" opacity="0.15"/>`;

@@ -379,11 +379,46 @@ def score_mouth_locking(
     except Exception:
         return 0.5
 
+    # —— 交牙/对顶约束（报告 06 §2.3）——
+    # 1) 两侧均须有砂（缺一侧 → 非关锁）
+    # 2) 两侧距离宜均衡（一远一近 = 未对顶）
+    # 3) 砂距过大（>1500m）视为无效对顶
+    MAX_SAND_M = 1500.0
+    left_ok = np.isfinite(d_left) and 5.0 < d_left < MAX_SAND_M
+    right_ok = np.isfinite(d_right) and 5.0 < d_right < MAX_SAND_M
+    if not left_ok and not right_ok:
+        mouth.lock_ratio = 0.0
+        return 0.0
+    if not left_ok or not right_ok:
+        # 单侧有砂：最多给弱分
+        d_one = d_left if left_ok else d_right
+        weak = float(np.clip(0.25 * (1.0 - d_one / MAX_SAND_M), 0.0, 0.25))
+        mouth.lock_ratio = weak
+        return weak
+
+    # 均衡度：min/max，1=完美对顶对称
+    balance = float(min(d_left, d_right) / max(d_left, d_right, 1e-6))
+    # 交牙因子：两侧砂在水口近处相向 → 距离和不宜过大，且均衡
     side_sum = d_left + d_right
     if side_sum <= 0.5:
+        mouth.lock_ratio = 0.0
         return 0.0
-    ratio = side_sum / max(width_m, 1.0)
+    # 几何 ratio：两侧砂距和 / 水面宽（传统锁口越紧 ratio 越大）
+    raw_ratio = side_sum / max(width_m, 1.0)
+    # 对顶修正：不均衡时降权；两侧过远（夹而不交）降权
+    far_pen = 1.0
+    if side_sum > 800.0:
+        far_pen = max(0.35, 1.0 - (side_sum - 800.0) / 2000.0)
+    jiao_factor = float(np.clip(0.45 + 0.55 * balance, 0.35, 1.0)) * far_pen
+    ratio = raw_ratio * jiao_factor
     mouth.lock_ratio = float(ratio)
+    # 记录诊断
+    try:
+        mouth.notes = (
+            f"{mouth.notes}; jiao bal={balance:.2f} L={d_left:.0f} R={d_right:.0f}"
+        ).strip("; ")
+    except Exception:
+        pass
 
     if ratio >= lock_good:
         return 1.0

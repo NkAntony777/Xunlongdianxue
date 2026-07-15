@@ -107,17 +107,18 @@ export async function runOnlineAnalysis() {
     const water = await fetchWater(
       state.center.lon, state.center.lat, state.radius_km,
     );
-    if (!water.ok) {
+    // ok:false 或 degraded 且无要素 → 数据不完整；有要素时仍渲染（缓存回退只提示）
+    const waterCount = Number(water.count) || (water.features || []).length || 0;
+    if (water.ok === false || (water.degraded && waterCount === 0)) {
       waterWarning = water.warning || "水系服务不可用";
-      relabelStep(2, "拉取水系（已跳过，服务不可用）");
-      setProgress(2, "skip", "水系跳过，将仅用 DEM 分析");
-    } else if (water.warning || water.degraded) {
-      waterWarning = water.warning || "水系降级";
-      relabelStep(2, `拉取水系（${water.count || 0} 条，有警告）`);
-      setProgress(2, "done", waterWarning);
+      relabelStep(2, waterCount ? "拉取水系（不完整）" : "拉取水系（已跳过）");
+      setProgress(2, "skip", waterCount ? waterWarning : "水系跳过，将仅用 DEM 分析");
+    } else if (water.warning && waterCount > 0) {
+      relabelStep(2, `拉取水系（${waterCount} 条${water.from_cache ? "·缓存" : ""}）`);
+      setProgress(2, "done", String(water.warning).slice(0, 48));
     } else {
-      relabelStep(2, `拉取水系（${water.count || 0} 条）`);
-      setProgress(2, "done", water.count ? `已获取 ${water.count} 条水系` : "范围内无水系要素");
+      relabelStep(2, `拉取水系（${waterCount} 条）`);
+      setProgress(2, "done", waterCount ? `已获取 ${waterCount} 条水系` : "范围内无水系要素");
     }
 
     setProgress(3, "active", "保存 GeoTIFF / GeoJSON…");
